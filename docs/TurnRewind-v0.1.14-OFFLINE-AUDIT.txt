@@ -1,0 +1,26 @@
+TurnRewind v0.1.14 offline audit
+Timestamp: 2026-07-26T13:04:09+08:00
+Passed: 21
+Failed: 0
+
+PASS: manifest version is v0.1.14
+PASS: load log version is v0.1.14
+PASS: snapshot stores exact creature references
+PASS: snapshot stores creature combat ids
+PASS: snapshot stores next creature id
+PASS: snapshot stores escaped creature list
+PASS: snapshot stores dedicated power state
+PASS: snapshot stores amount-on-turn-start
+PASS: snapshot stores duration skip flag
+PASS: restore reconciles creature roster
+PASS: post-snapshot creatures are removed
+PASS: missing snapshot creatures are re-added
+PASS: ally and enemy order are replaced exactly
+PASS: next creature id is restored
+PASS: non-player visuals are rebuilt when roster changes
+PASS: power is created at zero before owner attach
+PASS: power applies only after owner is supplied
+PASS: power turn metadata is restored
+PASS: power applier and target references are restored
+PASS: compiled binary exists: C:\Users\yummn\Documents\Codex\2026-07-12\2-mod-50\package-stage-TurnRewind-v0.1.14-PC\TurnRewind\TurnRewind.dll
+PASS: compiled binary exists: C:\Users\yummn\Documents\Codex\2026-07-12\2-mod-50\package-stage-TurnRewind-v0.1.14-Mobile\TurnRewind\TurnRewind.dll
