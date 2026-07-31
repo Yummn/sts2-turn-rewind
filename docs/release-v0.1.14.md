@@ -18,5 +18,5 @@
 
 ## 下载
 
-- `TurnRewind-v0.1.14-PC-v107.1.zip`
-- `TurnRewind-v0.1.14-Mobile-v103.zip`
+- `回合回溯-v0.1.14-电脑-v107.1.zip`
+- `回合回溯-v0.1.14-手机-v103.zip`
