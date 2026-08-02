@@ -94,6 +94,9 @@ internal static class SnapshotManager
     private static bool _initialized;
     private static bool _restoring;
     private static string? _lastCaptureKey;
+    private static readonly System.Reflection.PropertyInfo? CanUseOrRemovePotionsProperty =
+        AccessTools.Property(typeof(Player), "CanUseOrRemovePotions") ??
+        AccessTools.Property(typeof(Player), "CanRemovePotions");
 
     public static IReadOnlyList<TurnSnapshot> Snapshots => _snapshots;
 
@@ -466,7 +469,7 @@ internal static class SnapshotManager
                 {
                     PlayerId = player.NetId,
                     MaxPotionCount = Math.Max(player.MaxPotionCount, slotIds.Count),
-                    CanRemovePotions = player.CanRemovePotions,
+                    CanRemovePotions = GetCanUseOrRemovePotions(player),
                     SlotPotionIds = slotIds
                 });
             }
@@ -1015,7 +1018,31 @@ internal static class SnapshotManager
             }
         }
 
-        player.CanRemovePotions = canRemovePotions;
+        SetCanUseOrRemovePotions(player, canRemovePotions);
+    }
+
+    private static bool GetCanUseOrRemovePotions(Player player)
+    {
+        try
+        {
+            return CanUseOrRemovePotionsProperty?.GetValue(player) as bool? ?? true;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    private static void SetCanUseOrRemovePotions(Player player, bool value)
+    {
+        try
+        {
+            CanUseOrRemovePotionsProperty?.SetValue(player, value);
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[TurnRewind] potion availability flag restore skipped: {ex.Message}");
+        }
     }
 
     private static void SetPotionRuntimeFlags(object potion, bool isQueued, bool removed)

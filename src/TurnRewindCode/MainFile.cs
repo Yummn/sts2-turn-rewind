@@ -16,7 +16,7 @@ public partial class MainFile : Node
     {
         new Harmony(ModId).PatchAll();
         SnapshotManager.Initialize();
-        Logger.Info("[TurnRewind] loaded v0.1.14: creature snapshots now restore the exact monster roster/order, and powers are recreated only after their owner is attached.");
+        Logger.Info("[TurnRewind] loaded v0.1.15: v103/v110 potion availability interfaces are restored through one compatibility accessor.");
     }
 }
 
