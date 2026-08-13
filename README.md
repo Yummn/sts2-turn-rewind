@@ -1,25 +1,26 @@
-# 回合回溯 / TurnRewind
+# 回合回溯（Turn Rewind）
 
-《杀戮尖塔 2》战斗回合快照与回溯模组。战斗界面显示最多十个回合节点，长按节点可恢复该回合开始时的战斗状态。
+这是一个战斗内的回合快照 MOD。每个玩家回合开始时会保存一次状态，顶部木质回溯条最多保留 10 个节点；长按其中一个节点，就能回到那个回合的开头。
 
-## 最新版本
+它主要解决“操作已经做完才发现顺序错了”的情况，比整场重开更快，也能用来比较同一局面下的不同打法。
 
-- [v0.1.15](https://github.com/Yummn/sts2-turn-rewind/releases/tag/v0.1.15)：新增 Android v0.110.1 兼容。药水栏可用状态通过统一兼容访问器恢复，运行时会优先使用 v110 的 `CanUseOrRemovePotions`，并在 v103 使用 `CanRemovePotions`，避免直接引用另一版本不存在的接口。
-- [v0.1.14](https://github.com/Yummn/sts2-turn-rewind/releases/tag/v0.1.14)：修复回溯时怪物数量、身份、顺序和 Buff/Debuff 恢复错误。
-- [v0.1.13](https://github.com/Yummn/sts2-turn-rewind/releases/tag/v0.1.13)：修复机器人充能球快照恢复与视觉模型错位。
+## 会恢复什么
 
-## 兼容版本
+- 玩家与怪物状态、行动顺序和 Buff/Debuff。
+- 手牌、抽牌堆、弃牌堆、能量与出牌队列。
+- 药水槽及可用状态。
+- 故障机器人的充能球顺序、槽位和暗球等可变数值。
 
-- Android v0.103.2：使用文件名含“手机-v103”的压缩包。
-- Android v0.110.1：使用文件名含“手机-v110.1”的压缩包。
-- PC v0.107.1：使用文件名含“电脑-v107.1”的压缩包。
+快照采用先进先出方式，超过 10 个回合后会丢弃最早的节点。恢复会直接改变当前战斗状态，重要对局建议先确认选中的回合。
 
-## 安装
+## 版本与安装
 
-下载对应 Release 中的 ZIP。手机启动器可直接导入完整 ZIP；手动安装时，将 ZIP 内的 `TurnRewind` 文件夹完整复制到游戏 `mods` 目录。
+当前版本为 [v0.1.15](https://github.com/Yummn/sts2-turn-rewind/releases/tag/v0.1.15)，不依赖 BaseLib。它分别提供以下构建：
 
-不同游戏版本必须使用对应安装包，不能混用 DLL。
+- Android v0.103.2：文件名含“手机-v103”。
+- Android v0.110.1：文件名含“手机-v110.1”。
+- PC v0.107.1：文件名含“电脑-v107.1”。
 
-## 旧版本
+下载匹配版本的 ZIP，手机启动器可以直接导入；手动安装时，把 ZIP 内完整的 `TurnRewind` 文件夹复制到游戏的 `mods` 目录。不同游戏版本的 DLL 不要混用。
 
-GitHub Releases 保留历史版本；本地模组库只维护每个平台的最新版。
+历史修复与测试记录保留在 [GitHub Releases](https://github.com/Yummn/sts2-turn-rewind/releases) 和 `docs/` 中。
