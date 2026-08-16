@@ -50,6 +50,15 @@ public sealed class CreatureExtraSnapshot
     public List<MonsterState>? StateLog { get; init; }
     public bool? SpawnedThisTurn { get; init; }
     public bool? IsPerformingMove { get; init; }
+    public required bool IsStunned { get; init; }
+    public required List<MonsterRuntimeFieldSnapshot> MonsterRuntimeFields { get; init; }
+}
+
+public sealed class MonsterRuntimeFieldSnapshot
+{
+    public required string DeclaringType { get; init; }
+    public required string FieldName { get; init; }
+    public object? Value { get; init; }
 }
 
 public sealed class PowerExtraSnapshot
@@ -384,11 +393,11 @@ internal static class SnapshotManager
         RestoreCreatures(state, snapshot.CreatureExtras);
         MainFile.Logger.Info("[TurnRewind] apply state: restoring creature move extras.");
         RestoreCreatureExtras(state, snapshot.CreatureExtras);
-        if (rosterChanged)
-        {
-            MainFile.Logger.Info("[TurnRewind] apply state: rebuilding creature visuals.");
-            RebuildNonPlayerCreatureNodes(state);
-        }
+        // Rebuild even when the roster contains the same creature objects.
+        // Death, summon and stun animations live on NCreature nodes rather
+        // than in CombatState and otherwise survive the model rollback.
+        MainFile.Logger.Info($"[TurnRewind] apply state: rebuilding creature visuals (rosterChanged={rosterChanged}).");
+        RebuildNonPlayerCreatureNodes(state);
         MainFile.Logger.Info("[TurnRewind] apply state: restoring players.");
         RestorePlayers(state, snapshot);
         MainFile.Logger.Info("[TurnRewind] apply state: refreshing combat UI.");
@@ -430,10 +439,54 @@ internal static class SnapshotManager
                 PerformedFirstMove = machine is null ? null : AccessTools.Field(typeof(MonsterMoveStateMachine), "_performedFirstMove")?.GetValue(machine) as bool?,
                 StateLog = machine?.StateLog?.ToList(),
                 SpawnedThisTurn = monster?.SpawnedThisTurn,
-                IsPerformingMove = monster?.IsPerformingMove
+                IsPerformingMove = monster?.IsPerformingMove,
+                IsStunned = creature.IsStunned,
+                MonsterRuntimeFields = monster is null ? [] : CaptureMonsterRuntimeFields(monster)
             });
         }
         return result;
+    }
+
+    private static List<MonsterRuntimeFieldSnapshot> CaptureMonsterRuntimeFields(MonsterModel monster)
+    {
+        var result = new List<MonsterRuntimeFieldSnapshot>();
+        var flags = System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.DeclaredOnly;
+
+        // Monster subclasses keep encounter phase, summon ownership and
+        // special stun state in their own fields (for example Queen's
+        // _hasAmalgamDied/_amalgam and CeremonialBeast's stun flag). The
+        // generic network snapshot does not include those values.
+        for (var type = monster.GetType(); type is not null && type != typeof(MonsterModel); type = type.BaseType)
+        {
+            foreach (var field in type.GetFields(flags))
+            {
+                if (field.IsStatic || field.IsLiteral || field.IsInitOnly || !CanSnapshotMonsterField(field.FieldType))
+                    continue;
+                try
+                {
+                    result.Add(new MonsterRuntimeFieldSnapshot
+                    {
+                        DeclaringType = field.DeclaringType?.AssemblyQualifiedName ?? type.AssemblyQualifiedName ?? type.FullName ?? type.Name,
+                        FieldName = field.Name,
+                        Value = field.GetValue(monster)
+                    });
+                }
+                catch { }
+            }
+        }
+        return result;
+    }
+
+    private static bool CanSnapshotMonsterField(Type type)
+    {
+        var underlying = Nullable.GetUnderlyingType(type) ?? type;
+        return underlying.IsPrimitive || underlying.IsEnum || underlying == typeof(decimal) ||
+               underlying == typeof(string) || underlying == typeof(ModelId) ||
+               typeof(Creature).IsAssignableFrom(underlying) ||
+               typeof(MonsterState).IsAssignableFrom(underlying);
     }
 
     private static PowerExtraSnapshot CapturePower(PowerModel power)
@@ -574,6 +627,13 @@ internal static class SnapshotManager
             }
         }
 
+        // RemoveCreature can return early for an already-detached summon even
+        // though a stale side-list entry still exists. The exact side-list
+        // replacement below removes it from the roster; explicitly detach its
+        // CombatState as well so queued hooks cannot re-use it after restore.
+        foreach (var creature in before.Where(creature => !savedCreatures.Contains(creature)))
+            SetPropertyOrField(creature, "CombatState", null);
+
         foreach (var saved in snapshot.CreatureExtras.OrderBy(saved => saved.Index))
         {
             var creature = saved.Creature;
@@ -653,10 +713,7 @@ internal static class SnapshotManager
 
             try
             {
-                if (saved.NextMove is not null)
-                    monster.SetMoveImmediate(saved.NextMove, forceTransition: true);
-                else
-                    AccessTools.Field(typeof(MonsterModel), "<NextMove>k__BackingField")?.SetValue(monster, saved.NextMove);
+                RestoreMonsterRuntimeFields(monster, saved.MonsterRuntimeFields);
 
                 if (saved.SpawnedThisTurn.HasValue)
                     AccessTools.Field(typeof(MonsterModel), "_spawnedThisTurn")?.SetValue(monster, saved.SpawnedThisTurn.Value);
@@ -664,8 +721,29 @@ internal static class SnapshotManager
                     AccessTools.Field(typeof(MonsterModel), "_isPerformingMove")?.SetValue(monster, saved.IsPerformingMove.Value);
 
                 var machine = monster.MoveStateMachine;
-                if (saved.CurrentState is not null)
-                    machine.ForceCurrentState(saved.CurrentState);
+                // During an actual stun, CurrentState is STUNNED while NextMove
+                // already contains the move the monster will use after recovering.
+                // They are intentionally different and both must be restored.
+                var restoredState = saved.CurrentState ?? saved.NextMove;
+                if (restoredState is not null)
+                {
+                    // ForceCurrentState invokes transition logic.  For STUNNED
+                    // that logic immediately selected the monster's next normal
+                    // move, so a rewind visually revived the stun but the monster
+                    // was already actionable.  A snapshot restore must put the
+                    // cursor back without running Enter/Exit side effects.
+                    AccessTools.Field(typeof(MonsterMoveStateMachine), "_currentState")
+                        ?.SetValue(machine, restoredState);
+                }
+
+                // Write NextMove after the cursor.  Some state-machine transition
+                // helpers replace this property as a side effect; restoring it
+                // last keeps Creature.IsStunned and the intent UI in agreement.
+                var nextMoveBackingField = AccessTools.Field(typeof(MonsterModel), "<NextMove>k__BackingField");
+                if (nextMoveBackingField is not null)
+                    nextMoveBackingField.SetValue(monster, saved.NextMove);
+                else
+                    SetPropertyOrField(monster, "NextMove", saved.NextMove);
                 if (saved.PerformedFirstMove.HasValue)
                     AccessTools.Field(typeof(MonsterMoveStateMachine), "_performedFirstMove")?.SetValue(machine, saved.PerformedFirstMove.Value);
                 if (saved.StateLog is not null)
@@ -716,6 +794,30 @@ internal static class SnapshotManager
             catch (Exception ex)
             {
                 MainFile.Logger.Warn($"[TurnRewind] failed to restore power {saved.Id}: {ex.Message}");
+            }
+        }
+    }
+
+    private static void RestoreMonsterRuntimeFields(MonsterModel monster, IReadOnlyList<MonsterRuntimeFieldSnapshot> fields)
+    {
+        foreach (var saved in fields)
+        {
+            try
+            {
+                var declaringType = Type.GetType(saved.DeclaringType, throwOnError: false) ??
+                    FindType(saved.DeclaringType.Split(',')[0]);
+                var field = declaringType?.GetField(
+                    saved.FieldName,
+                    System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.DeclaredOnly);
+                if (field is not null && field.DeclaringType?.IsInstanceOfType(monster) == true)
+                    field.SetValue(monster, saved.Value);
+            }
+            catch (Exception ex)
+            {
+                MainFile.Logger.Warn($"[TurnRewind] failed to restore monster field {saved.FieldName}: {ex.Message}");
             }
         }
     }

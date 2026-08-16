@@ -1,4 +1,4 @@
-﻿using Godot;
+using Godot;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Modding;
@@ -16,9 +16,10 @@ public partial class MainFile : Node
     {
         new Harmony(ModId).PatchAll();
         SnapshotManager.Initialize();
-        Logger.Info("[TurnRewind] loaded v0.1.15: v103/v110 potion availability interfaces are restored through one compatibility accessor.");
+        Logger.Info("[TurnRewind] loaded v0.1.16: monster subclass phase/summon fields and exact stunned move state are restored, with creature visuals rebuilt after every rewind.");
     }
 }
+
 
 
 

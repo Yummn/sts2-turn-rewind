@@ -19,8 +19,8 @@ def main() -> int:
     manifest = (root / "TurnRewind.json").read_text(encoding="utf-8")
 
     checks = {
-        "manifest version is v0.1.14": '"version": "v0.1.14"' in manifest,
-        "load log version is v0.1.14": "loaded v0.1.14" in main_file,
+        "manifest version is v0.1.16": '"version": "v0.1.16"' in manifest,
+        "load log version is v0.1.16": "loaded v0.1.16" in main_file,
         "snapshot stores exact creature references": "public required Creature Creature" in source,
         "snapshot stores creature combat ids": "public required uint? CombatId" in source,
         "snapshot stores next creature id": "public required uint NextCreatureId" in source,
@@ -36,7 +36,17 @@ def main() -> int:
             and 'ReplaceCreatureSideList(state, "_enemies"' in source
         ),
         "next creature id is restored": '"_nextCreatureId")?.SetValue(state, snapshot.NextCreatureId)' in source,
-        "non-player visuals are rebuilt when roster changes": "RebuildNonPlayerCreatureNodes(state)" in source,
+        "non-player visuals are rebuilt after every rewind": "RebuildNonPlayerCreatureNodes(state)" in source,
+        "monster subclass runtime fields are snapshotted": (
+            "MonsterRuntimeFieldSnapshot" in source
+            and "CaptureMonsterRuntimeFields" in source
+            and "RestoreMonsterRuntimeFields" in source
+        ),
+        "stun cursor restores without transition side effects": (
+            '"_currentState"' in source
+            and '"<NextMove>k__BackingField"' in source
+            and "ForceCurrentState(restoredState)" not in source
+        ),
         "power is created at zero before owner attach": (
             "ModelDb.GetById<PowerModel>(saved.Id).ToMutable();" in source
             and "var power = ModelDb.GetById<PowerModel>(saved.Id).ToMutable(saved.Amount)" not in source
@@ -59,7 +69,7 @@ def main() -> int:
     passed = [name for name, ok in checks.items() if ok]
     failed = [name for name, ok in checks.items() if not ok]
     report = [
-        "TurnRewind v0.1.14 offline audit",
+        "TurnRewind v0.1.16 offline audit",
         f"Timestamp: {dt.datetime.now().astimezone().isoformat(timespec='seconds')}",
         f"Passed: {len(passed)}",
         f"Failed: {len(failed)}",
