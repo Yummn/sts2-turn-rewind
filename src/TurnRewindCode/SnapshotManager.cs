@@ -2,6 +2,7 @@
 using Godot;
 using System.Collections;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Combat.History;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
@@ -26,6 +27,7 @@ public sealed class TurnSnapshot
     public required CombatSide CurrentSide { get; init; }
     public required int PlayerTurnNumber { get; init; }
     public required NetFullCombatState FullState { get; init; }
+    public required List<CombatHistoryEntry> CombatHistoryEntries { get; init; }
     public required List<CreatureExtraSnapshot> CreatureExtras { get; init; }
     public required uint NextCreatureId { get; init; }
     public required List<Creature> EscapedCreatures { get; init; }
@@ -223,6 +225,7 @@ internal static class SnapshotManager
             CurrentSide = state.CurrentSide,
             PlayerTurnNumber = turn,
             FullState = NetFullCombatState.FromRun(state.RunState, null),
+            CombatHistoryEntries = CombatManager.Instance.History.Entries.ToList(),
             CreatureExtras = CaptureCreatureExtras(state),
             NextCreatureId = GetNextCreatureId(state),
             EscapedCreatures = state.EscapedCreatures.ToList(),
@@ -393,6 +396,13 @@ internal static class SnapshotManager
         RestoreCreatures(state, snapshot.CreatureExtras);
         MainFile.Logger.Info("[TurnRewind] apply state: restoring creature move extras.");
         RestoreCreatureExtras(state, snapshot.CreatureExtras);
+        // A large set of cards, powers and relics use CombatHistory as their
+        // per-turn memory.  Leaving post-snapshot entries in place made Echo
+        // Form believe its first-card repeat had already been consumed after
+        // rewinding to the start of the turn.  Restore the exact entry prefix
+        // captured with the combat state before any hook is queried again.
+        MainFile.Logger.Info("[TurnRewind] apply state: restoring combat history.");
+        RestoreCombatHistory(snapshot.CombatHistoryEntries);
         // Rebuild even when the roster contains the same creature objects.
         // Death, summon and stun animations live on NCreature nodes rather
         // than in CombatState and otherwise survive the model rollback.
@@ -445,6 +455,32 @@ internal static class SnapshotManager
             });
         }
         return result;
+    }
+
+    private static void RestoreCombatHistory(IReadOnlyList<CombatHistoryEntry> entries)
+    {
+        try
+        {
+            var history = CombatManager.Instance.History;
+            if (AccessTools.Field(typeof(CombatHistory), "_entries")?.GetValue(history) is not IList liveEntries)
+            {
+                MainFile.Logger.Warn("[TurnRewind] combat history restore skipped: _entries unavailable.");
+                return;
+            }
+
+            var before = liveEntries.Count;
+            liveEntries.Clear();
+            foreach (var entry in entries)
+                liveEntries.Add(entry);
+
+            if (AccessTools.Field(typeof(CombatHistory), "Changed")?.GetValue(history) is Delegate changed)
+                changed.DynamicInvoke();
+            MainFile.Logger.Info($"[TurnRewind] combat history restored: {before}->{liveEntries.Count} entries.");
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[TurnRewind] combat history restore failed: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     private static List<MonsterRuntimeFieldSnapshot> CaptureMonsterRuntimeFields(MonsterModel monster)

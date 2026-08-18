@@ -4,7 +4,8 @@
 
 ## 最新版本
 
-- [v0.1.16](https://github.com/Yummn/sts2-turn-rewind/releases/tag/v0.1.16)：修复召唤物死亡后回溯的怪物阶段与归属错误，并精确恢复击晕状态。已在女王/火炬头实战中验证：火炬头死亡后回溯不会再与女王阶段并存，击晕回溯后仍保持眩晕。
+- [v0.1.17](https://github.com/Yummn/sts2-turn-rewind/releases/tag/v0.1.17)：快照现在会同步保存并恢复完整战斗历史，修复回溯到回合开始后回响形态仍被误判为“本回合已触发”的问题。已在 Android v0.110.1 实战中验证原版回响（第一张牌重复）和 BetterDefect 改造回响（第二张牌重复），能力层数及触发次数均能正确恢复。
+- [v0.1.16](https://github.com/Yummn/sts2-turn-rewind/releases/tag/v0.1.16)：修复召唤物死亡后回溯的怪物阶段与归属错误，并精确恢复击晕状态。
 - [v0.1.15](https://github.com/Yummn/sts2-turn-rewind/releases/tag/v0.1.15)：新增 Android v0.110.1 兼容。药水栏可用状态通过统一兼容访问器恢复，运行时会优先使用 v110 的 `CanUseOrRemovePotions`，并在 v103 使用 `CanRemovePotions`，避免直接引用另一版本不存在的接口。
 - [v0.1.14](https://github.com/Yummn/sts2-turn-rewind/releases/tag/v0.1.14)：修复回溯时怪物数量、身份、顺序和 Buff/Debuff 恢复错误。
 - [v0.1.13](https://github.com/Yummn/sts2-turn-rewind/releases/tag/v0.1.13)：修复机器人充能球快照恢复与视觉模型错位。

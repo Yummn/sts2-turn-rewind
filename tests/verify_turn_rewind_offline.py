@@ -19,8 +19,23 @@ def main() -> int:
     manifest = (root / "TurnRewind.json").read_text(encoding="utf-8")
 
     checks = {
-        "manifest version is v0.1.16": '"version": "v0.1.16"' in manifest,
-        "load log version is v0.1.16": "loaded v0.1.16" in main_file,
+        "manifest version is v0.1.17": '"version": "v0.1.17"' in manifest,
+        "load log version is v0.1.17": "loaded v0.1.17" in main_file,
+        "snapshot stores complete combat history": "public required List<CombatHistoryEntry> CombatHistoryEntries" in source,
+        "capture copies combat history entries": "CombatHistory.Instance" not in source and "CombatManager.Instance.History.Entries.ToList()" in source,
+        "restore replaces combat history before player state": (
+            "RestoreCombatHistory(snapshot.CombatHistoryEntries);" in source
+            and source.index("RestoreCombatHistory(snapshot.CombatHistoryEntries);") < source.index("RestorePlayers(state, snapshot);")
+        ),
+        "restore clears and repopulates the live history list": (
+            'AccessTools.Field(typeof(CombatHistory), "_entries")' in source
+            and "liveEntries.Clear();" in source
+            and "liveEntries.Add(entry);" in source
+        ),
+        "history changed event is raised after restore": (
+            'AccessTools.Field(typeof(CombatHistory), "Changed")' in source
+            and "changed.DynamicInvoke();" in source
+        ),
         "snapshot stores exact creature references": "public required Creature Creature" in source,
         "snapshot stores creature combat ids": "public required uint? CombatId" in source,
         "snapshot stores next creature id": "public required uint NextCreatureId" in source,
@@ -69,7 +84,7 @@ def main() -> int:
     passed = [name for name, ok in checks.items() if ok]
     failed = [name for name, ok in checks.items() if not ok]
     report = [
-        "TurnRewind v0.1.16 offline audit",
+        "TurnRewind v0.1.17 offline audit",
         f"Timestamp: {dt.datetime.now().astimezone().isoformat(timespec='seconds')}",
         f"Passed: {len(passed)}",
         f"Failed: {len(failed)}",

@@ -16,7 +16,7 @@ public partial class MainFile : Node
     {
         new Harmony(ModId).PatchAll();
         SnapshotManager.Initialize();
-        Logger.Info("[TurnRewind] loaded v0.1.16: monster subclass phase/summon fields and exact stunned move state are restored, with creature visuals rebuilt after every rewind.");
+        Logger.Info("[TurnRewind] loaded v0.1.17: combat history is snapshotted and restored so per-turn card, power and relic triggers reset correctly after rewind.");
     }
 }
 
