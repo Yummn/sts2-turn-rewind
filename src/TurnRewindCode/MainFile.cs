@@ -16,7 +16,7 @@ public partial class MainFile : Node
     {
         new Harmony(ModId).PatchAll();
         SnapshotManager.Initialize();
-        Logger.Info("[TurnRewind] loaded v0.1.17: combat history is snapshotted and restored so per-turn card, power and relic triggers reset correctly after rewind.");
+        Logger.Info("[TurnRewind] loaded v0.1.18: relic SavedProperty counters and visible status are restored on the existing relic instances after rewind.");
     }
 }
 

@@ -7,6 +7,7 @@ using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Entities.Relics;
 using MegaCrit.Sts2.Core.Entities.UI;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Models;
@@ -17,6 +18,7 @@ using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
+using MegaCrit.Sts2.Core.Saves.Runs;
 
 namespace TurnRewind;
 
@@ -33,8 +35,24 @@ public sealed class TurnSnapshot
     public required List<Creature> EscapedCreatures { get; init; }
     public required List<PotionBarSnapshot> PotionBars { get; init; }
     public required List<OrbQueueSnapshot> OrbQueues { get; init; }
+    public required List<PlayerRelicSnapshot> PlayerRelics { get; init; }
     public required string Label { get; init; }
     public required string Key { get; init; }
+}
+
+public sealed class PlayerRelicSnapshot
+{
+    public required object? PlayerId { get; init; }
+    public required List<RelicStateSnapshot> Relics { get; init; }
+}
+
+public sealed class RelicStateSnapshot
+{
+    public required int Index { get; init; }
+    public required ModelId Id { get; init; }
+    public required SerializableRelic Serializable { get; init; }
+    public required RelicStatus Status { get; init; }
+    public required int DisplayAmount { get; init; }
 }
 
 public sealed class CreatureExtraSnapshot
@@ -231,6 +249,7 @@ internal static class SnapshotManager
             EscapedCreatures = state.EscapedCreatures.ToList(),
             PotionBars = CapturePotionBars(state),
             OrbQueues = orbQueues,
+            PlayerRelics = CapturePlayerRelics(state),
             Label = $"T{turn}",
             Key = key
         };
@@ -239,7 +258,7 @@ internal static class SnapshotManager
         while (_snapshots.Count > MaxSnapshots)
             _snapshots.RemoveAt(0);
 
-        MainFile.Logger.Info($"[TurnRewind] captured player turn snapshot ({reason}): seq={snapshot.Sequence}, turn={turn}, energy={energy}, hand={handCount}, potions={potionCount}, orbs={DescribeOrbQueues(snapshot.OrbQueues)}, queue={_snapshots.Count}.");
+        MainFile.Logger.Info($"[TurnRewind] captured player turn snapshot ({reason}): seq={snapshot.Sequence}, turn={turn}, energy={energy}, hand={handCount}, potions={potionCount}, relics={snapshot.PlayerRelics.Sum(p => p.Relics.Count)}, orbs={DescribeOrbQueues(snapshot.OrbQueues)}, queue={_snapshots.Count}.");
         RewindBar.RefreshAllBars();
     }
 
@@ -935,6 +954,7 @@ internal static class SnapshotManager
             player.Gold = GetMember(saved, "gold", "Gold", player.Gold);
             TryRestorePlayerRng(player, saved);
             TryRestoreRelicGrabBag(player, saved);
+            RestorePlayerRelics(player, snapshot);
 
             var pcs = player.PlayerCombatState;
             var savedTurn = GetSavedTurnNumber(saved, state.RoundNumber);
@@ -955,6 +975,80 @@ internal static class SnapshotManager
             pcs.RecalculateCardValues();
             MainFile.Logger.Info($"[TurnRewind] restored player {player.NetId}: turn={GetTurnNumber(pcs, state.RoundNumber)}, phase={GetPlayerPhase(pcs)}, energy={pcs.Energy}, hand={pcs.Hand.Cards.Count}, draw={pcs.DrawPile.Cards.Count}, discard={pcs.DiscardPile.Cards.Count}, exhaust={pcs.ExhaustPile.Cards.Count}, play={pcs.PlayPile.Cards.Count}, potions={CountPlayerPotions(player)}.");
         }
+    }
+
+    private static List<PlayerRelicSnapshot> CapturePlayerRelics(CombatState state)
+    {
+        var result = new List<PlayerRelicSnapshot>();
+        foreach (var player in state.Players)
+        {
+            var relics = new List<RelicStateSnapshot>();
+            for (var i = 0; i < player.Relics.Count; i++)
+            {
+                var relic = player.Relics[i];
+                try
+                {
+                    relics.Add(new RelicStateSnapshot
+                    {
+                        Index = i,
+                        Id = relic.Id,
+                        Serializable = relic.ToSerializable(),
+                        Status = relic.Status,
+                        DisplayAmount = relic.DisplayAmount
+                    });
+                }
+                catch (Exception ex)
+                {
+                    MainFile.Logger.Warn($"[TurnRewind] relic snapshot skipped for {relic.Id}: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+
+            result.Add(new PlayerRelicSnapshot
+            {
+                PlayerId = player.NetId,
+                Relics = relics
+            });
+        }
+        return result;
+    }
+
+    private static void RestorePlayerRelics(Player player, TurnSnapshot snapshot)
+    {
+        var savedPlayer = snapshot.PlayerRelics.FirstOrDefault(p => ValuesEqual(p.PlayerId, player.NetId));
+        if (savedPlayer is null)
+            return;
+
+        var restored = 0;
+        foreach (var saved in savedPlayer.Relics)
+        {
+            RelicModel? relic = null;
+            if (saved.Index >= 0 && saved.Index < player.Relics.Count && player.Relics[saved.Index].Id == saved.Id)
+                relic = player.Relics[saved.Index];
+            relic ??= player.Relics.FirstOrDefault(r => r.Id == saved.Id);
+            if (relic is null)
+                continue;
+
+            try
+            {
+                // Relic counters are generally [SavedProperty] values.  Fill the
+                // existing instance rather than replacing it so the relic bar's
+                // signal subscriptions remain valid; property setters also emit
+                // DisplayAmountChanged and immediately refresh the visible count.
+                saved.Serializable.Props?.Fill(relic);
+                if (saved.Serializable.FloorAddedToDeck.HasValue)
+                    relic.FloorAddedToDeck = saved.Serializable.FloorAddedToDeck.Value;
+                relic.Status = saved.Status;
+                InvokeByName(relic, "InvokeDisplayAmountChanged");
+                restored++;
+                MainFile.Logger.Info($"[TurnRewind] restored relic {relic.Id}: counter={relic.DisplayAmount} (snapshot={saved.DisplayAmount}), status={relic.Status}.");
+            }
+            catch (Exception ex)
+            {
+                MainFile.Logger.Warn($"[TurnRewind] relic restore skipped for {saved.Id}: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        MainFile.Logger.Info($"[TurnRewind] restored relic runtime state for player {player.NetId}: {restored}/{savedPlayer.Relics.Count}.");
     }
 
     private static void SetTurnNumber(PlayerCombatState pcs, int value)
