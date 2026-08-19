@@ -65,9 +65,12 @@ public sealed class CreatureExtraSnapshot
     public required int Block { get; init; }
     public required List<PowerExtraSnapshot> Powers { get; init; }
     public MoveState? NextMove { get; init; }
+    public string? NextMoveId { get; init; }
     public MonsterState? CurrentState { get; init; }
+    public string? CurrentStateId { get; init; }
     public bool? PerformedFirstMove { get; init; }
     public List<MonsterState>? StateLog { get; init; }
+    public List<string>? StateLogIds { get; init; }
     public bool? SpawnedThisTurn { get; init; }
     public bool? IsPerformingMove { get; init; }
     public required bool IsStunned { get; init; }
@@ -89,6 +92,14 @@ public sealed class PowerExtraSnapshot
     public required bool SkipNextDurationTick { get; init; }
     public Creature? Applier { get; init; }
     public Creature? Target { get; init; }
+    public required List<PowerRuntimeFieldSnapshot> RuntimeFields { get; init; }
+}
+
+public sealed class PowerRuntimeFieldSnapshot
+{
+    public required string DeclaringType { get; init; }
+    public required string FieldName { get; init; }
+    public object? Value { get; init; }
 }
 
 public sealed class PotionBarSnapshot
@@ -464,9 +475,12 @@ internal static class SnapshotManager
                 Block = creature.Block,
                 Powers = creature.Powers.Select(CapturePower).ToList(),
                 NextMove = monster?.NextMove,
+                NextMoveId = monster?.NextMove?.Id,
                 CurrentState = machine is null ? null : AccessTools.Field(typeof(MonsterMoveStateMachine), "_currentState")?.GetValue(machine) as MonsterState,
+                CurrentStateId = (machine is null ? null : AccessTools.Field(typeof(MonsterMoveStateMachine), "_currentState")?.GetValue(machine) as MonsterState)?.Id,
                 PerformedFirstMove = machine is null ? null : AccessTools.Field(typeof(MonsterMoveStateMachine), "_performedFirstMove")?.GetValue(machine) as bool?,
                 StateLog = machine?.StateLog?.ToList(),
+                StateLogIds = machine?.StateLog?.Select(state => state.Id).ToList(),
                 SpawnedThisTurn = monster?.SpawnedThisTurn,
                 IsPerformingMove = monster?.IsPerformingMove,
                 IsStunned = creature.IsStunned,
@@ -553,8 +567,45 @@ internal static class SnapshotManager
             AmountOnTurnStart = power.AmountOnTurnStart,
             SkipNextDurationTick = power.SkipNextDurationTick,
             Applier = GetMember<Creature>(power, "Applier", "_applier"),
-            Target = GetMember<Creature>(power, "Target", "_target")
+            Target = GetMember<Creature>(power, "Target", "_target"),
+            RuntimeFields = CapturePowerRuntimeFields(power)
         };
+    }
+
+    private static List<PowerRuntimeFieldSnapshot> CapturePowerRuntimeFields(PowerModel power)
+    {
+        var result = new List<PowerRuntimeFieldSnapshot>();
+        var flags = System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.DeclaredOnly;
+        for (var type = power.GetType(); type is not null && type != typeof(PowerModel); type = type.BaseType)
+        {
+            foreach (var field in type.GetFields(flags))
+            {
+                if (field.IsStatic || field.IsLiteral || field.IsInitOnly || !CanSnapshotPowerField(field.FieldType))
+                    continue;
+                try
+                {
+                    result.Add(new PowerRuntimeFieldSnapshot
+                    {
+                        DeclaringType = field.DeclaringType?.AssemblyQualifiedName ?? type.AssemblyQualifiedName ?? type.FullName ?? type.Name,
+                        FieldName = field.Name,
+                        Value = field.GetValue(power)
+                    });
+                }
+                catch { }
+            }
+        }
+        return result;
+    }
+
+    private static bool CanSnapshotPowerField(Type type)
+    {
+        var underlying = Nullable.GetUnderlyingType(type) ?? type;
+        return underlying.IsPrimitive || underlying.IsEnum || underlying == typeof(decimal) ||
+               underlying == typeof(string) || underlying == typeof(ModelId) ||
+               typeof(Creature).IsAssignableFrom(underlying);
     }
 
     private static List<PotionBarSnapshot> CapturePotionBars(CombatState state)
@@ -779,7 +830,10 @@ internal static class SnapshotManager
                 // During an actual stun, CurrentState is STUNNED while NextMove
                 // already contains the move the monster will use after recovering.
                 // They are intentionally different and both must be restored.
-                var restoredState = saved.CurrentState ?? saved.NextMove;
+                var restoredState = ResolveMonsterState(
+                    machine,
+                    saved.CurrentStateId,
+                    saved.CurrentState ?? saved.NextMove);
                 if (restoredState is not null)
                 {
                     // ForceCurrentState invokes transition logic.  For STUNNED
@@ -794,18 +848,36 @@ internal static class SnapshotManager
                 // Write NextMove after the cursor.  Some state-machine transition
                 // helpers replace this property as a side effect; restoring it
                 // last keeps Creature.IsStunned and the intent UI in agreement.
+                var restoredNextMove = ResolveMonsterState(machine, saved.NextMoveId, saved.NextMove) as MoveState
+                    ?? saved.NextMove;
                 var nextMoveBackingField = AccessTools.Field(typeof(MonsterModel), "<NextMove>k__BackingField");
                 if (nextMoveBackingField is not null)
-                    nextMoveBackingField.SetValue(monster, saved.NextMove);
+                    nextMoveBackingField.SetValue(monster, restoredNextMove);
                 else
-                    SetPropertyOrField(monster, "NextMove", saved.NextMove);
+                    SetPropertyOrField(monster, "NextMove", restoredNextMove);
                 if (saved.PerformedFirstMove.HasValue)
                     AccessTools.Field(typeof(MonsterMoveStateMachine), "_performedFirstMove")?.SetValue(machine, saved.PerformedFirstMove.Value);
                 if (saved.StateLog is not null)
                 {
                     machine.StateLog.Clear();
-                    machine.StateLog.AddRange(saved.StateLog);
+                    for (var i = 0; i < saved.StateLog.Count; i++)
+                    {
+                        var stateId = saved.StateLogIds is not null && i < saved.StateLogIds.Count
+                            ? saved.StateLogIds[i]
+                            : saved.StateLog[i].Id;
+                        var restoredLogState = ResolveMonsterState(machine, stateId, saved.StateLog[i]);
+                        if (restoredLogState is not null)
+                            machine.StateLog.Add(restoredLogState);
+                    }
                 }
+
+                var starterMove = GetRawMember(monster, "StarterMoveIdx")?.ToString() ?? "n/a";
+                var currentStateId = restoredState?.Id ?? "null";
+                var nextMoveId = restoredNextMove?.Id ?? "null";
+                var performedFirstMove = saved.PerformedFirstMove?.ToString() ?? "null";
+                MainFile.Logger.Info(
+                    $"[TurnRewind] restored monster intent {monster.Id}: " +
+                    $"starter={starterMove}, current={currentStateId}, next={nextMoveId}, first={performedFirstMove}.");
             }
             catch (Exception ex)
             {
@@ -845,11 +917,86 @@ internal static class SnapshotManager
                 power.SkipNextDurationTick = saved.SkipNextDurationTick;
                 SetPropertyOrField(power, "_applier", saved.Applier);
                 SetPropertyOrField(power, "_target", saved.Target);
+                RestorePowerRuntimeFields(power, saved.RuntimeFields);
             }
             catch (Exception ex)
             {
                 MainFile.Logger.Warn($"[TurnRewind] failed to restore power {saved.Id}: {ex.Message}");
             }
+        }
+
+        SyncCreaturePowerVisuals(creature);
+    }
+
+    private static MonsterState? ResolveMonsterState(
+        MonsterMoveStateMachine machine,
+        string? stateId,
+        MonsterState? fallback)
+    {
+        if (!string.IsNullOrWhiteSpace(stateId) && machine.States.TryGetValue(stateId, out var liveState))
+            return liveState;
+
+        // STUNNED and other transient states are not guaranteed to be present in
+        // States. Keep the captured instance only when it still represents the
+        // requested state, rather than replacing it with a newly rolled move.
+        if (fallback is not null &&
+            (string.IsNullOrWhiteSpace(stateId) || string.Equals(fallback.Id, stateId, StringComparison.Ordinal)))
+            return fallback;
+
+        return null;
+    }
+
+    private static void RestorePowerRuntimeFields(PowerModel power, IReadOnlyList<PowerRuntimeFieldSnapshot> fields)
+    {
+        foreach (var saved in fields)
+        {
+            try
+            {
+                var declaringType = Type.GetType(saved.DeclaringType, throwOnError: false) ??
+                    FindType(saved.DeclaringType.Split(',')[0]);
+                var field = declaringType?.GetField(
+                    saved.FieldName,
+                    System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.DeclaredOnly);
+                if (field is not null && field.DeclaringType?.IsInstanceOfType(power) == true)
+                    field.SetValue(power, saved.Value);
+            }
+            catch (Exception ex)
+            {
+                MainFile.Logger.Warn($"[TurnRewind] failed to restore power field {saved.FieldName}: {ex.Message}");
+            }
+        }
+    }
+
+    private static void SyncCreaturePowerVisuals(Creature creature)
+    {
+        try
+        {
+            var surrounded = creature.Powers.FirstOrDefault(power => power.GetType().Name == "SurroundedPower");
+            if (surrounded is null || NCombatRoom.Instance is not { } room)
+                return;
+
+            var flipScale = AccessTools.Method(surrounded.GetType(), "FlipScale");
+            if (flipScale is null)
+                return;
+
+            var bodies = new List<Node2D?> { room.GetCreatureNode(creature)?.Body };
+            bodies.AddRange(creature.Pets.Select(pet => room.GetCreatureNode(pet)?.Body));
+            foreach (var body in bodies.Where(body => body is not null))
+                flipScale.Invoke(surrounded, [body]);
+
+            var facing = GetRawMember(surrounded, "Facing")?.ToString()
+                ?? GetRawMember(surrounded, "_facing")?.ToString()
+                ?? "unknown";
+            var scaleX = bodies.FirstOrDefault()?.Scale.X.ToString("0.###") ?? "n/a";
+            MainFile.Logger.Info(
+                $"[TurnRewind] synchronized Surrounded facing: facing={facing}, scaleX={scaleX}.");
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[TurnRewind] power visual synchronization failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 

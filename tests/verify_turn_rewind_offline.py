@@ -14,13 +14,14 @@ def main() -> int:
     args = parser.parse_args()
 
     root = args.root.resolve()
-    source = (root / "TurnRewindCode" / "SnapshotManager.cs").read_text(encoding="utf-8")
-    main_file = (root / "TurnRewindCode" / "MainFile.cs").read_text(encoding="utf-8")
-    manifest = (root / "TurnRewind.json").read_text(encoding="utf-8")
+    source_root = root / "src" if (root / "src").is_dir() else root
+    source = (source_root / "TurnRewindCode" / "SnapshotManager.cs").read_text(encoding="utf-8")
+    main_file = (source_root / "TurnRewindCode" / "MainFile.cs").read_text(encoding="utf-8")
+    manifest = (source_root / "TurnRewind.json").read_text(encoding="utf-8")
 
     checks = {
-        "manifest version is v0.1.17": '"version": "v0.1.17"' in manifest,
-        "load log version is v0.1.17": "loaded v0.1.17" in main_file,
+        "manifest version is v0.1.19": '"version": "v0.1.19"' in manifest,
+        "load log version is v0.1.19": "loaded v0.1.19" in main_file,
         "snapshot stores complete combat history": "public required List<CombatHistoryEntry> CombatHistoryEntries" in source,
         "capture copies combat history entries": "CombatHistory.Instance" not in source and "CombatManager.Instance.History.Entries.ToList()" in source,
         "restore replaces combat history before player state": (
@@ -75,6 +76,25 @@ def main() -> int:
             'SetPropertyOrField(power, "_applier", saved.Applier)' in source
             and 'SetPropertyOrField(power, "_target", saved.Target)' in source
         ),
+        "monster intent state ids are snapshotted": (
+            "public string? NextMoveId" in source
+            and "public string? CurrentStateId" in source
+            and "public List<string>? StateLogIds" in source
+        ),
+        "monster states resolve against the live machine": (
+            "ResolveMonsterState" in source
+            and "machine.States.TryGetValue(stateId, out var liveState)" in source
+        ),
+        "power subclass runtime fields are snapshotted": (
+            "PowerRuntimeFieldSnapshot" in source
+            and "CapturePowerRuntimeFields" in source
+            and "RestorePowerRuntimeFields" in source
+        ),
+        "surrounded facing visuals are synchronized": (
+            'power.GetType().Name == "SurroundedPower"' in source
+            and 'AccessTools.Method(surrounded.GetType(), "FlipScale")' in source
+            and "SyncCreaturePowerVisuals(creature);" in source
+        ),
     }
 
     for binary in args.binary:
@@ -84,7 +104,7 @@ def main() -> int:
     passed = [name for name, ok in checks.items() if ok]
     failed = [name for name, ok in checks.items() if not ok]
     report = [
-        "TurnRewind v0.1.17 offline audit",
+        "TurnRewind v0.1.19 offline audit",
         f"Timestamp: {dt.datetime.now().astimezone().isoformat(timespec='seconds')}",
         f"Passed: {len(passed)}",
         f"Failed: {len(failed)}",
