@@ -75,6 +75,12 @@ public partial class Runner : Node
         await Wait(.2);
         if(Equals(field.GetValue(power),original) || Math.Sign(body.Scale.X)==originalSign) throw new InvalidOperationException("fixture failed to turn away");
         Restore(manager,snapshot); await Wait(.3);
+        // TurnRewind intentionally rebuilds PowerModel instances. Reacquire the
+        // restored Surrounded power rather than asserting against the detached
+        // pre-rewind instance.
+        power=creature.Powers.First(p=>p.GetType().Name=="SurroundedPower");
+        field=AccessTools.Field(power.GetType(),"_facing")!;
+        face=AccessTools.Method(power.GetType(),"FaceDirection")!;
         if(!Equals(field.GetValue(power),original) || Math.Sign(body.Scale.X)!=originalSign)
             throw new InvalidOperationException($"restore mismatch facing={field.GetValue(power)}/{original} sign={Math.Sign(body.Scale.X)}/{originalSign}");
         if(face.Invoke(power,[opposite]) is Task turnAgain) await turnAgain;
