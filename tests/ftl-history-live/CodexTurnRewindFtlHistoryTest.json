@@ -1,0 +1,1 @@
+{"id":"CodexTurnRewindFtlHistoryTest","name":"Codex Turn Rewind FTL History Test","author":"Codex","description":"Temporary live regression for card-play counters and FTL after rewind.","version":"0.1.0","min_game_version":"0.110.1","has_pck":false,"has_dll":true,"dependencies":["TurnRewind"],"affects_gameplay":false}

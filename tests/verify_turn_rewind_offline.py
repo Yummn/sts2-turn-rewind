@@ -20,8 +20,8 @@ def main() -> int:
     manifest = (source_root / "TurnRewind.json").read_text(encoding="utf-8")
 
     checks = {
-        "manifest version is v0.1.19": '"version": "v0.1.19"' in manifest,
-        "load log version is v0.1.19": "loaded v0.1.19" in main_file,
+        "manifest version is v0.1.20": '"version": "v0.1.20"' in manifest,
+        "load log version is v0.1.20": "loaded v0.1.20" in main_file,
         "snapshot stores complete combat history": "public required List<CombatHistoryEntry> CombatHistoryEntries" in source,
         "capture copies combat history entries": "CombatHistory.Instance" not in source and "CombatManager.Instance.History.Entries.ToList()" in source,
         "restore replaces combat history before player state": (
@@ -90,6 +90,17 @@ def main() -> int:
             and "CapturePowerRuntimeFields" in source
             and "RestorePowerRuntimeFields" in source
         ),
+        "card-play counters refresh after player restore": (
+            "RefreshCardPlayCountersAfterRestore(state);" in source
+            and source.index("RestorePlayers(state, snapshot);") < source.index("RefreshCardPlayCountersAfterRestore(state);")
+            and "RecalculateCardValues" in source
+        ),
+        "BetterDefect combat counters rebuild from restored history": (
+            "SynchronizeBetterDefectCombatCounters" in source
+            and '"LightningChanneled"' in source
+            and '"FrostChanneled"' in source
+            and '"PowerCardsPlayed"' in source
+        ),
         "surrounded facing visuals are synchronized": (
             'power.GetType().Name == "SurroundedPower"' in source
             and 'AccessTools.Method(surrounded.GetType(), "FlipScale")' in source
@@ -104,7 +115,7 @@ def main() -> int:
     passed = [name for name, ok in checks.items() if ok]
     failed = [name for name, ok in checks.items() if not ok]
     report = [
-        "TurnRewind v0.1.19 offline audit",
+        "TurnRewind v0.1.20 offline audit",
         f"Timestamp: {dt.datetime.now().astimezone().isoformat(timespec='seconds')}",
         f"Passed: {len(passed)}",
         f"Failed: {len(failed)}",

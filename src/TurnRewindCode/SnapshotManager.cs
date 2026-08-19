@@ -440,6 +440,12 @@ internal static class SnapshotManager
         RebuildNonPlayerCreatureNodes(state);
         MainFile.Logger.Info("[TurnRewind] apply state: restoring players.");
         RestorePlayers(state, snapshot);
+        // CombatHistory listeners fired earlier while the old hand/card nodes
+        // were still attached. Re-synchronize mod counters, recalculate cards,
+        // then emit Changed again so FTL-style play-count conditions and their
+        // glow/description UI observe the restored timeline immediately.
+        MainFile.Logger.Info("[TurnRewind] apply state: refreshing card-play counters.");
+        RefreshCardPlayCountersAfterRestore(state);
         MainFile.Logger.Info("[TurnRewind] apply state: refreshing combat UI.");
         RefreshCombatUiAfterRestore(state);
     }
@@ -513,6 +519,93 @@ internal static class SnapshotManager
         catch (Exception ex)
         {
             MainFile.Logger.Warn($"[TurnRewind] combat history restore failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void RefreshCardPlayCountersAfterRestore(CombatState state)
+    {
+        try
+        {
+            var history = CombatManager.Instance.History;
+            SynchronizeBetterDefectCombatCounters(state, history.Entries.ToList());
+
+            foreach (var player in state.Players)
+            {
+                player.PlayerCombatState?.RecalculateCardValues();
+                var started = history.CardPlaysStarted.Count(entry =>
+                    entry.HappenedThisTurn(state) && entry.CardPlay.Card.Owner == player);
+                var finished = history.CardPlaysFinished.Count(entry =>
+                    entry.HappenedThisTurn(state) && entry.CardPlay.Card.Owner == player);
+                MainFile.Logger.Info(
+                    $"[TurnRewind] restored current-turn card counters for {player.NetId}: " +
+                    $"started={started}, finished={finished}.");
+            }
+
+            if (AccessTools.Field(typeof(CombatHistory), "Changed")?.GetValue(history) is Delegate changed)
+                changed.DynamicInvoke();
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn(
+                $"[TurnRewind] card-play counter refresh failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void SynchronizeBetterDefectCombatCounters(
+        CombatState state,
+        IReadOnlyList<CombatHistoryEntry> entries)
+    {
+        var trackerType = FindType("BetterDefect.BdCombatTracker");
+        var forMethod = trackerType is null ? null : AccessTools.Method(trackerType, "For");
+        if (forMethod is null)
+            return;
+
+        foreach (var player in state.Players)
+        {
+            try
+            {
+                var stats = forMethod.Invoke(null, [player]);
+                if (stats is null)
+                    continue;
+
+                var lightning = 0;
+                var frost = 0;
+                var powerCards = 0;
+                foreach (var entry in entries)
+                {
+                    if (!ReferenceEquals(entry.Actor, player.Creature))
+                        continue;
+
+                    if (entry.GetType().Name == "OrbChanneledEntry")
+                    {
+                        var orb = GetRawMember(entry, "Orb");
+                        var orbName = orb?.GetType().Name;
+                        if (orbName == "LightningOrb") lightning++;
+                        else if (orbName == "FrostOrb") frost++;
+                        continue;
+                    }
+
+                    if (entry.GetType().Name != "CardPlayStartedEntry")
+                        continue;
+                    var cardPlay = GetRawMember(entry, "CardPlay");
+                    var card = GetRawMember(cardPlay!, "Card") as CardModel;
+                    var playIndex = GetMember(cardPlay!, "PlayIndex", "playIndex", 0);
+                    if (card?.Type == CardType.Power && playIndex == 0)
+                        powerCards++;
+                }
+
+                SetPropertyOrField(stats, "LightningChanneled", lightning);
+                SetPropertyOrField(stats, "FrostChanneled", frost);
+                SetPropertyOrField(stats, "PowerCardsPlayed", powerCards);
+                MainFile.Logger.Info(
+                    $"[TurnRewind] synchronized BetterDefect counters for {player.NetId}: " +
+                    $"lightning={lightning}, frost={frost}, powers={powerCards}.");
+            }
+            catch (Exception ex)
+            {
+                MainFile.Logger.Warn(
+                    $"[TurnRewind] BetterDefect counter synchronization failed for {player.NetId}: {ex.Message}");
+            }
         }
     }
 

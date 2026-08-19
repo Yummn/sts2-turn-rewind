@@ -16,7 +16,7 @@ public partial class MainFile : Node
     {
         new Harmony(ModId).PatchAll();
         SnapshotManager.Initialize();
-        Logger.Info("[TurnRewind] loaded v0.1.19: exact monster intent state and Surrounded facing visuals are restored after rewind.");
+        Logger.Info("[TurnRewind] loaded v0.1.20: card-play counters, dependent card UI and BetterDefect combat counters are synchronized after rewind.");
     }
 }
 
