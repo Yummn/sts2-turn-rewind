@@ -1,0 +1,1 @@
+{"id":"CodexTurnRewindV0121RaceTest","name":"Codex Turn Rewind v0.1.21 Race Test","author":"Codex","description":"Temporary live regression for mid-action rewind, final turn snapshot and once-per-combat enchantments.","version":"0.1.0","min_game_version":"0.107.1","has_pck":false,"has_dll":true,"dependencies":["TurnRewind"],"affects_gameplay":false}

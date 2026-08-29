@@ -1,10 +1,13 @@
 ﻿using HarmonyLib;
 using Godot;
 using System.Collections;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Combat.History;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
+using MegaCrit.Sts2.Core.Entities.Enchantments;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Relics;
@@ -36,8 +39,20 @@ public sealed class TurnSnapshot
     public required List<PotionBarSnapshot> PotionBars { get; init; }
     public required List<OrbQueueSnapshot> OrbQueues { get; init; }
     public required List<PlayerRelicSnapshot> PlayerRelics { get; init; }
+    public required List<CardLineageSnapshot> CardLineages { get; init; }
     public required string Label { get; init; }
     public required string Key { get; init; }
+}
+
+public sealed class CardLineageSnapshot
+{
+    public required object? PlayerId { get; init; }
+    public required PileType PileType { get; init; }
+    public required int Index { get; init; }
+    public required string Token { get; init; }
+    public CardModel? DeckVersion { get; init; }
+    public EnchantmentStatus? EnchantmentStatus { get; init; }
+    public bool? GlamUsedThisCombat { get; init; }
 }
 
 public sealed class PlayerRelicSnapshot
@@ -133,7 +148,11 @@ internal static class SnapshotManager
     private static int _sequence;
     private static bool _initialized;
     private static bool _restoring;
+    private static bool _restorePending;
     private static string? _lastCaptureKey;
+    private sealed class CardLineageToken(string id) { public string Id { get; } = id; }
+    private static ConditionalWeakTable<CardModel, CardLineageToken> _cardLineageTokens = new();
+    private static readonly HashSet<string> _consumedCombatEnchantments = [];
     private static readonly System.Reflection.PropertyInfo? CanUseOrRemovePotionsProperty =
         AccessTools.Property(typeof(Player), "CanUseOrRemovePotions") ??
         AccessTools.Property(typeof(Player), "CanRemovePotions");
@@ -196,11 +215,10 @@ internal static class SnapshotManager
             if (!CombatManager.Instance.IsInProgress || state.CurrentSide != CombatSide.Player)
                 return;
 
-            // CombatManager.TurnStarted fires before SetupPlayerTurn has fully reset
-            // energy/drawn hand/potion usability on v103.  The real snapshot is
-            // captured by CombatManagerSetupPlayerTurnPatch after that task
-            // completes, so this handler is kept only as a lightweight fallback
-            // subscription point and deliberately does not serialize state.
+            // TurnStarted is emitted after AfterSideTurnStart, orb passives and
+            // BeforePlayPhaseStart. Replace the earlier SetupPlayerTurn fallback
+            // so Countdown/Doom and every other start-of-turn effect are present.
+            CapturePlayerTurnSnapshotFinal(state, state.Players.FirstOrDefault(), "after TurnStarted");
         }
         catch (Exception ex)
         {
@@ -235,7 +253,13 @@ internal static class SnapshotManager
         }
     }
 
-    private static void CapturePlayerTurnSnapshot(CombatState state, Player? player, string reason)
+    private static void CapturePlayerTurnSnapshot(CombatState state, Player? player, string reason) =>
+        CapturePlayerTurnSnapshotCore(state, player, reason, replaceExistingSameKey: false);
+
+    private static void CapturePlayerTurnSnapshotFinal(CombatState state, Player? player, string reason) =>
+        CapturePlayerTurnSnapshotCore(state, player, reason, replaceExistingSameKey: true);
+
+    private static void CapturePlayerTurnSnapshotCore(CombatState state, Player? player, string reason, bool replaceExistingSameKey)
     {
         var turn = player?.PlayerCombatState is { } pcs ? GetTurnNumber(pcs, state.RoundNumber) : state.RoundNumber;
         var energy = player?.PlayerCombatState?.Energy ?? -1;
@@ -243,13 +267,16 @@ internal static class SnapshotManager
         var potionCount = CountPlayerPotions(player);
         var orbQueues = CaptureOrbQueues(state);
         var key = $"{state.GetHashCode()}:{state.RoundNumber}:{turn}:{state.CurrentSide}:{CombatManager.Instance.History.GetHashCode()}";
-        if (_lastCaptureKey == key)
+        var existingIndex = _snapshots.FindLastIndex(s => s.Key == key);
+        if (_lastCaptureKey == key && (!replaceExistingSameKey || existingIndex < 0))
             return;
         _lastCaptureKey = key;
 
+        var sequence = existingIndex >= 0 ? _snapshots[existingIndex].Sequence : ++_sequence;
+
         var snapshot = new TurnSnapshot
         {
-            Sequence = ++_sequence,
+            Sequence = sequence,
             RoundNumber = state.RoundNumber,
             CurrentSide = state.CurrentSide,
             PlayerTurnNumber = turn,
@@ -261,15 +288,19 @@ internal static class SnapshotManager
             PotionBars = CapturePotionBars(state),
             OrbQueues = orbQueues,
             PlayerRelics = CapturePlayerRelics(state),
+            CardLineages = CaptureCardLineages(state),
             Label = $"T{turn}",
             Key = key
         };
 
-        _snapshots.Add(snapshot);
+        if (existingIndex >= 0)
+            _snapshots[existingIndex] = snapshot;
+        else
+            _snapshots.Add(snapshot);
         while (_snapshots.Count > MaxSnapshots)
             _snapshots.RemoveAt(0);
 
-        MainFile.Logger.Info($"[TurnRewind] captured player turn snapshot ({reason}): seq={snapshot.Sequence}, turn={turn}, energy={energy}, hand={handCount}, potions={potionCount}, relics={snapshot.PlayerRelics.Sum(p => p.Relics.Count)}, orbs={DescribeOrbQueues(snapshot.OrbQueues)}, queue={_snapshots.Count}.");
+        MainFile.Logger.Info($"[TurnRewind] {(existingIndex >= 0 ? "replaced" : "captured")} player turn snapshot ({reason}): seq={snapshot.Sequence}, turn={turn}, energy={energy}, hand={handCount}, potions={potionCount}, relics={snapshot.PlayerRelics.Sum(p => p.Relics.Count)}, orbs={DescribeOrbQueues(snapshot.OrbQueues)}, queue={_snapshots.Count}.");
         RewindBar.RefreshAllBars();
     }
 
@@ -277,12 +308,15 @@ internal static class SnapshotManager
     {
         _snapshots.Clear();
         _lastCaptureKey = null;
+        _restorePending = false;
+        _cardLineageTokens = new ConditionalWeakTable<CardModel, CardLineageToken>();
+        _consumedCombatEnchantments.Clear();
         RewindBar.RefreshAllBars();
     }
 
-    public static void Restore(TurnSnapshot snapshot)
+    public static async void Restore(TurnSnapshot snapshot)
     {
-        if (_restoring)
+        if (_restoring || _restorePending)
             return;
 
         var state = CombatManager.Instance.DebugOnlyGetState();
@@ -291,8 +325,22 @@ internal static class SnapshotManager
 
         try
         {
+            _restorePending = true;
+            MainFile.Logger.Info($"[TurnRewind] restore requested: seq={snapshot.Sequence}, turn={snapshot.PlayerTurnNumber}; waiting for active card/status animation action to finish.");
+
+            if (!await WaitForSafeRestoreBoundary())
+            {
+                MainFile.Logger.Warn($"[TurnRewind] restore canceled after timeout: seq={snapshot.Sequence}; an interactive action is still active, state was not mutated.");
+                return;
+            }
+
+            state = CombatManager.Instance.DebugOnlyGetState();
+            if (state is null || !CombatManager.Instance.IsInProgress)
+                return;
+
             _restoring = true;
-            MainFile.Logger.Info($"[TurnRewind] restoring snapshot seq={snapshot.Sequence}, turn={snapshot.PlayerTurnNumber}.");
+            RememberConsumedCombatEnchantments(state);
+            MainFile.Logger.Info($"[TurnRewind] safe action boundary reached; restoring snapshot seq={snapshot.Sequence}, turn={snapshot.PlayerTurnNumber}.");
 
             // Stop the active executor/turn coroutine at the next pause point while we mutate the combat graph.
             CombatManager.Instance.Pause();
@@ -318,8 +366,38 @@ internal static class SnapshotManager
         finally
         {
             _restoring = false;
+            _restorePending = false;
             RewindBar.RefreshAllBars();
         }
+    }
+
+    private static async Task<bool> WaitForSafeRestoreBoundary()
+    {
+        var stopwatch = Stopwatch.StartNew();
+        while (stopwatch.Elapsed < TimeSpan.FromSeconds(10))
+        {
+            var executor = RunManager.Instance.ActionExecutor;
+            if (!executor.IsRunning && executor.CurrentlyRunningAction is null)
+            {
+                // The queue can become idle one frame before its final card tween
+                // and generated-status preview release their NCard nodes.
+                await AwaitProcessFrame();
+                await AwaitProcessFrame();
+                if (!executor.IsRunning && executor.CurrentlyRunningAction is null)
+                    return true;
+            }
+            await AwaitProcessFrame();
+        }
+        return false;
+    }
+
+    private static async Task AwaitProcessFrame()
+    {
+        var tree = Engine.GetMainLoop() as SceneTree;
+        if (tree is not null)
+            await tree.ToSignal(tree, SceneTree.SignalName.ProcessFrame);
+        else
+            await Task.Yield();
     }
 
     private static void ApplyManagerFlagsForPlayerTurn(TurnSnapshot snapshot)
@@ -1208,13 +1286,118 @@ internal static class SnapshotManager
                     RestorePotionsReflective(player, saved);
             }
             catch (Exception ex) { MainFile.Logger.Warn($"[TurnRewind] potion state restore failed before pile restore for {player.NetId}: {ex.GetType().Name}: {ex.Message}"); }
-            RestorePilesReflective(state, player, GetEnumerableMember(saved, "piles", "Piles"));
+            RestorePilesReflective(state, player, GetEnumerableMember(saved, "piles", "Piles"), snapshot);
             if (!RestoreOrbsFromSnapshot(player, snapshot))
                 RestoreOrbsReflective(player, GetEnumerableMember(saved, "orbs", "Orbs"));
             RebuildOrbUiAfterRestore(player);
             pcs.RecalculateCardValues();
             MainFile.Logger.Info($"[TurnRewind] restored player {player.NetId}: turn={GetTurnNumber(pcs, state.RoundNumber)}, phase={GetPlayerPhase(pcs)}, energy={pcs.Energy}, hand={pcs.Hand.Cards.Count}, draw={pcs.DrawPile.Cards.Count}, discard={pcs.DiscardPile.Cards.Count}, exhaust={pcs.ExhaustPile.Cards.Count}, play={pcs.PlayPile.Cards.Count}, potions={CountPlayerPotions(player)}.");
         }
+    }
+
+    private static List<CardLineageSnapshot> CaptureCardLineages(CombatState state)
+    {
+        var result = new List<CardLineageSnapshot>();
+        foreach (var player in state.Players)
+        {
+            if (player.PlayerCombatState is not { } pcs)
+                continue;
+
+            foreach (var pile in pcs.AllPiles)
+            {
+                for (var index = 0; index < pile.Cards.Count; index++)
+                {
+                    var card = pile.Cards[index];
+                    var token = _cardLineageTokens.GetValue(card, _ => new CardLineageToken(Guid.NewGuid().ToString("N")));
+                    result.Add(new CardLineageSnapshot
+                    {
+                        PlayerId = player.NetId,
+                        PileType = pile.Type,
+                        Index = index,
+                        Token = token.Id,
+                        DeckVersion = card.DeckVersion,
+                        EnchantmentStatus = card.Enchantment?.Status,
+                        GlamUsedThisCombat = GetGlamUsedThisCombat(card)
+                    });
+                }
+            }
+        }
+        return result;
+    }
+
+    private static void RememberConsumedCombatEnchantments(CombatState state)
+    {
+        foreach (var player in state.Players)
+        {
+            if (player.PlayerCombatState is not { } pcs)
+                continue;
+            foreach (var card in pcs.AllPiles.SelectMany(p => p.Cards))
+            {
+                if (card.Enchantment is null)
+                    continue;
+                if (card.Enchantment.Status != EnchantmentStatus.Disabled && GetGlamUsedThisCombat(card) != true)
+                    continue;
+
+                var token = _cardLineageTokens.GetValue(card, _ => new CardLineageToken(Guid.NewGuid().ToString("N")));
+                _consumedCombatEnchantments.Add(token.Id);
+            }
+        }
+    }
+
+    private static bool? GetGlamUsedThisCombat(CardModel card)
+    {
+        var enchantment = card.Enchantment;
+        if (enchantment is null || enchantment.GetType().Name != "Glam")
+            return null;
+        try
+        {
+            var value = AccessTools.Property(enchantment.GetType(), "UsedThisCombat")?.GetValue(enchantment)
+                ?? AccessTools.Field(enchantment.GetType(), "_usedThisCombat")?.GetValue(enchantment);
+            return value is bool used ? used : null;
+        }
+        catch { return null; }
+    }
+
+    private static void RestoreCardLineage(CardModel card, TurnSnapshot snapshot, object? playerId, PileType pileType, int index)
+    {
+        var saved = snapshot.CardLineages.FirstOrDefault(s =>
+            ValuesEqual(s.PlayerId, playerId) && s.PileType == pileType && s.Index == index);
+        if (saved is null)
+            return;
+
+        try
+        {
+            _cardLineageTokens.Remove(card);
+            _cardLineageTokens.Add(card, new CardLineageToken(saved.Token));
+            card.DeckVersion = saved.DeckVersion;
+
+            if (card.Enchantment is { } enchantment && saved.EnchantmentStatus.HasValue)
+            {
+                enchantment.Status = saved.EnchantmentStatus.Value;
+                if (saved.GlamUsedThisCombat.HasValue)
+                    SetGlamUsedThisCombat(enchantment, saved.GlamUsedThisCombat.Value);
+
+                // Once-per-combat enchantments are monotonic. Rewinding card
+                // position/state must not grant their first-use effect again.
+                if (_consumedCombatEnchantments.Contains(saved.Token))
+                {
+                    enchantment.Status = EnchantmentStatus.Disabled;
+                    SetGlamUsedThisCombat(enchantment, true);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[TurnRewind] card lineage restore skipped for {card.Id}: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void SetGlamUsedThisCombat(object enchantment, bool value)
+    {
+        if (enchantment.GetType().Name != "Glam")
+            return;
+        try { AccessTools.PropertySetter(enchantment.GetType(), "UsedThisCombat")?.Invoke(enchantment, [value]); } catch { }
+        try { AccessTools.Field(enchantment.GetType(), "_usedThisCombat")?.SetValue(enchantment, value); } catch { }
     }
 
     private static List<PlayerRelicSnapshot> CapturePlayerRelics(CombatState state)
@@ -1574,7 +1757,7 @@ internal static class SnapshotManager
         _ => null
     };
 
-    private static void RestorePilesReflective(CombatState state, Player player, IEnumerable savedPiles)
+    private static void RestorePilesReflective(CombatState state, Player player, IEnumerable savedPiles, TurnSnapshot snapshot)
     {
         var pcs = player.PlayerCombatState!;
         foreach (var pile in pcs.AllPiles)
@@ -1597,6 +1780,7 @@ internal static class SnapshotManager
             if (pile is null)
                 continue;
 
+            var cardIndex = 0;
             foreach (var savedCard in GetEnumerableMember(savedPile, "cards", "Cards").Cast<object>())
             {
                 try
@@ -1608,11 +1792,13 @@ internal static class SnapshotManager
                     state.AddCard(card, player);
                     RestoreCardLocalStateReflective(card, savedCard);
                     pile.AddInternal(card, silent: false);
+                    RestoreCardLineage(card, snapshot, player.NetId, pileType, cardIndex);
                 }
                 catch (Exception ex)
                 {
                     MainFile.Logger.Warn($"[TurnRewind] failed to restore card in {pileType}: {ex.Message}");
                 }
+                cardIndex++;
             }
             pile.InvokeCardAddFinished();
             pile.InvokeContentsChanged();
@@ -1822,19 +2008,46 @@ internal static class SnapshotManager
         try
         {
             if (AccessTools.Field(typeof(NCardPlayQueue), "_playQueue")?.GetValue(ui.PlayQueue) is IList queue)
+            {
+                foreach (var item in queue.Cast<object>().ToList())
+                {
+                    try { (AccessTools.Field(item.GetType(), "currentTween")?.GetValue(item) as Tween)?.Kill(); } catch { }
+                    try { RemoveAndFreeCardNode(AccessTools.Field(item.GetType(), "card")?.GetValue(item) as NCard); } catch { }
+                }
                 queue.Clear();
+            }
         }
         catch { }
 
         try
         {
-            foreach (var card in ui.PlayContainer.GetChildren().OfType<NCard>().ToList())
-            {
-                try { ui.PlayContainer.RemoveChild(card); } catch { }
-                try { card.QueueFree(); } catch { }
-            }
+            // Generated status cards and played cards are parented at different
+            // points below NCombatUi. Clear every stale visual before rebuilding
+            // the restored hand; otherwise a mid-animation rewind leaves a card
+            // hovering forever and NPlayerHand remains locked.
+            foreach (var card in FindCardNodes(ui).ToList())
+                RemoveAndFreeCardNode(card);
         }
         catch { }
+    }
+
+    private static IEnumerable<NCard> FindCardNodes(Node root)
+    {
+        foreach (var child in root.GetChildren())
+        {
+            if (child is NCard card)
+                yield return card;
+            foreach (var nested in FindCardNodes(child))
+                yield return nested;
+        }
+    }
+
+    private static void RemoveAndFreeCardNode(NCard? card)
+    {
+        if (card is null || !GodotObject.IsInstanceValid(card))
+            return;
+        try { card.GetParent()?.RemoveChild(card); } catch { }
+        try { card.QueueFree(); } catch { }
     }
 
     private static void ForceRefreshEnergyAndStars(NCombatUi ui, PlayerCombatState pcs)
