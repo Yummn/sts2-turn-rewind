@@ -12,6 +12,7 @@ using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Relics;
 using MegaCrit.Sts2.Core.Entities.UI;
+using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
@@ -374,21 +375,106 @@ internal static class SnapshotManager
     private static async Task<bool> WaitForSafeRestoreBoundary()
     {
         var stopwatch = Stopwatch.StartNew();
+        var stableFrames = 0;
+        var reportedVisualWait = false;
         while (stopwatch.Elapsed < TimeSpan.FromSeconds(10))
         {
             var executor = RunManager.Instance.ActionExecutor;
-            if (!executor.IsRunning && executor.CurrentlyRunningAction is null)
+            var executorIdle = !executor.IsRunning && executor.CurrentlyRunningAction is null;
+            var visualIdle = IsCardVisualPipelineIdle(out var visualState);
+            var noPendingCardAction = !HasPendingCardAction();
+            if (executorIdle && visualIdle && noPendingCardAction)
             {
-                // The queue can become idle one frame before its final card tween
-                // and generated-status preview release their NCard nodes.
-                await AwaitProcessFrame();
-                await AwaitProcessFrame();
-                if (!executor.IsRunning && executor.CurrentlyRunningAction is null)
+                // Require several consecutive clean frames. Echo Form's repeated
+                // play can finish its GameAction one or two frames before the
+                // final play-pile tween/callback releases the card node. Restoring
+                // in that gap leaves the next card attached to the old callback
+                // and it hangs in the middle of the screen.
+                stableFrames++;
+                if (stableFrames >= 4)
                     return true;
+            }
+            else
+            {
+                stableFrames = 0;
+                if (executorIdle && !visualIdle && !reportedVisualWait)
+                {
+                    reportedVisualWait = true;
+                    MainFile.Logger.Info($"[TurnRewind] action executor is idle but card animation pipeline is still active ({visualState}); waiting before rewind.");
+                }
             }
             await AwaitProcessFrame();
         }
         return false;
+    }
+
+    private static bool IsCardVisualPipelineIdle(out string state)
+    {
+        try
+        {
+            var ui = NCombatRoom.Instance?.Ui;
+            if (ui is null)
+            {
+                state = "combat-ui unavailable";
+                return false;
+            }
+
+            var queueCount = (AccessTools.Field(typeof(NCardPlayQueue), "_playQueue")?.GetValue(ui.PlayQueue) as IList)?.Count ?? 0;
+            var awaitingCount = GetCollectionCount(AccessTools.Field(typeof(NPlayerHand), "_holdersAwaitingQueue")?.GetValue(ui.Hand));
+            var inCardPlay = GetRawMember(ui.Hand, "InCardPlay") as bool? ??
+                             AccessTools.Field(typeof(NPlayerHand), "_currentCardPlay")?.GetValue(ui.Hand) is not null;
+            var playNodes = ui.PlayContainer.GetChildren().OfType<NCard>().Count(card => GodotObject.IsInstanceValid(card));
+            state = $"queue={queueCount}, awaiting={awaitingCount}, selecting={inCardPlay}, playNodes={playNodes}";
+            return queueCount == 0 && awaitingCount == 0 && !inCardPlay && playNodes == 0;
+        }
+        catch (Exception ex)
+        {
+            // Failing closed is safer than mutating combat while an unknown card
+            // animation owns the hand. The outer timeout lets the player retry.
+            state = $"inspection failed: {ex.GetType().Name}";
+            return false;
+        }
+    }
+
+    private static int GetCollectionCount(object? collection)
+    {
+        if (collection is ICollection nonGeneric)
+            return nonGeneric.Count;
+        return collection?.GetType().GetProperty("Count")?.GetValue(collection) as int? ?? 0;
+    }
+
+    private static bool HasPendingCardAction()
+    {
+        try
+        {
+            var synchronizer = RunManager.Instance.ActionQueueSynchronizer;
+            var waiting = AccessTools.Field(synchronizer.GetType(), "_requestedActionsWaitingForPlayerTurn")?.GetValue(synchronizer) as IEnumerable;
+            if (waiting is not null && waiting.Cast<object>().Any(IsWaitingCardAction))
+                return true;
+
+            var queueSet = RunManager.Instance.ActionQueueSet;
+            var queues = AccessTools.Field(queueSet.GetType(), "_actionQueues")?.GetValue(queueSet) as IEnumerable;
+            if (queues is null)
+                return false;
+            foreach (var queue in queues)
+            {
+                var actions = AccessTools.Field(queue.GetType(), "actions")?.GetValue(queue) as IEnumerable;
+                if (actions is not null && actions.Cast<object>().Any(IsWaitingCardAction))
+                    return true;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    private static bool IsWaitingCardAction(object action)
+    {
+        if (action is not PlayCardAction)
+            return false;
+        var state = GetRawMember(action, "State")?.ToString();
+        return !string.Equals(state, "Finished", StringComparison.Ordinal) &&
+               !string.Equals(state, "Canceled", StringComparison.Ordinal) &&
+               !string.Equals(state, "None", StringComparison.Ordinal);
     }
 
     private static async Task AwaitProcessFrame()
