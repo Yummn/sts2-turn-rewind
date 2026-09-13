@@ -65,6 +65,7 @@ public partial class Runner : Node
             await echoAction.CompletionTask;
             await Wait(.5);
             if (player.Creature.GetPower<EchoFormPower>() is null) throw new InvalidOperationException("Echo Form was not applied");
+            player.PlayerCombatState!.Energy=99;
             AccessTools.Field(rewind,"_lastCaptureKey")!.SetValue(null,null);
             AccessTools.Method(rewind,"CapturePlayerTurnSnapshot")!.Invoke(null,[state,player,"post transformed Echo baseline"]);
             var snapshots=(IList)AccessTools.Field(rewind,"_snapshots")!.GetValue(null)!;
@@ -81,9 +82,14 @@ public partial class Runner : Node
             if(await Task.WhenAny(dirtyAction.CompletionTask,Task.Delay(8000))!=dirtyAction.CompletionTask)
                 throw new TimeoutException($"dirty transformed-Echo card stuck: {dirtyAction.State}");
             await dirtyAction.CompletionTask;
+            var lingeringVisual=NCard.Create(dirtyCard) ?? throw new InvalidOperationException("could not create lingering Echo visual");
+            NCombatRoom.Instance!.Ui.PlayContainer.AddChild(lingeringVisual);
+            _=ReleaseVisualAfter(lingeringVisual,.6);
             MainFile.Log.Info($"[CodexTurnRewindEchoActionTest] requesting rewind immediately after Echo-replayed card; playNodes={PlayNodeCount()}, queueVisuals={QueueCount()}.");
+            var restoreWait=System.Diagnostics.Stopwatch.StartNew();
             AccessTools.Method(rewind,"Restore")!.Invoke(null,[snapshot]);
             for(var i=0;i<1200 && (bool)AccessTools.Field(rewind,"_restorePending")!.GetValue(null)!;i++) await Wait(.01);
+            if(restoreWait.Elapsed<TimeSpan.FromSeconds(.5)) throw new InvalidOperationException($"rewind did not wait for lingering Echo visual: {restoreWait.Elapsed.TotalMilliseconds:0}ms");
             await Wait(.25);
 
             state=CombatManager.Instance.DebugOnlyGetState()!; player=state.Players[0];
@@ -123,6 +129,11 @@ public partial class Runner : Node
         if(_upgradeKeys is null || _savedUpgradeKeys is null) return;
         _upgradeKeys.Clear();
         foreach(var key in _savedUpgradeKeys) _upgradeKeys.Add(key);
+    }
+    private async Task ReleaseVisualAfter(NCard card,double seconds)
+    {
+        await Wait(seconds);
+        if(GodotObject.IsInstanceValid(card)) card.QueueFree();
     }
     private static int QueueCount()=>((IList)AccessTools.Field(typeof(NCardPlayQueue),"_playQueue")!.GetValue(NCardPlayQueue.Instance)!).Count;
     private static int PlayNodeCount()=>NCombatRoom.Instance!.Ui.PlayContainer.GetChildren().OfType<NCard>().Count();

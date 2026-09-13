@@ -14,4 +14,9 @@
 - Android v0.103.2
 - Android v0.110.1
 
-此前的真实出牌基线已验证：原版回响与 BetterDefect 改造回响在回溯后，下一张 `PlayCardAction` 都能完成并离开屏幕。本版额外覆盖该动作结束与视觉释放之间的竞态窗口。当前机器 Steam 客户端未建立用户会话，未在本次发布前重新启动游戏执行最终 live test；测试模组源码保存在 `tests/v0122-echo-action-live`。
+PC v0.107.1 专项实战测试已通过：强制启用 BetterDefect 改造回响，制造一个在动作执行器空闲后仍停留 0.6 秒的中央卡牌节点，立即请求回溯；模组正确等待视觉节点释放后才恢复，随后真实打出故障机器人打击，动作完成且卡牌离开屏幕。测试源码保存在 `tests/v0122-echo-action-live`。
+
+```text
+[TurnRewind] action executor is idle but card animation pipeline is still active (... playNodes=1); waiting before rewind.
+[CodexTurnRewindEchoActionTest] PASS: post-Echo rewind card action completed and left the screen.
+```
