@@ -16,9 +16,10 @@ public partial class MainFile : Node
     {
         new Harmony(ModId).PatchAll();
         SnapshotManager.Initialize();
-        Logger.Info("[TurnRewind] loaded v0.1.20: card-play counters, dependent card UI and BetterDefect combat counters are synchronized after rewind.");
+        Logger.Info("[TurnRewind] loaded v0.1.23: monster-turn async safety and thorn-monster model/animation state restore.");
     }
 }
+
 
 
 

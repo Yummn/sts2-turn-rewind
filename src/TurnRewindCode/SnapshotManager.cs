@@ -377,13 +377,15 @@ internal static class SnapshotManager
         var stopwatch = Stopwatch.StartNew();
         var stableFrames = 0;
         var reportedVisualWait = false;
+        var reportedMonsterWait = false;
         while (stopwatch.Elapsed < TimeSpan.FromSeconds(10))
         {
             var executor = RunManager.Instance.ActionExecutor;
             var executorIdle = !executor.IsRunning && executor.CurrentlyRunningAction is null;
             var visualIdle = IsCardVisualPipelineIdle(out var visualState);
             var noPendingCardAction = !HasPendingCardAction();
-            if (executorIdle && visualIdle && noPendingCardAction)
+            var monsterTurnIdle = IsMonsterTurnPipelineIdle(out var monsterState);
+            if (executorIdle && visualIdle && noPendingCardAction && monsterTurnIdle)
             {
                 // Require several consecutive clean frames. Echo Form's repeated
                 // play can finish its GameAction one or two frames before the
@@ -402,10 +404,50 @@ internal static class SnapshotManager
                     reportedVisualWait = true;
                     MainFile.Logger.Info($"[TurnRewind] action executor is idle but card animation pipeline is still active ({visualState}); waiting before rewind.");
                 }
+                if (!monsterTurnIdle && !reportedMonsterWait)
+                {
+                    reportedMonsterWait = true;
+                    MainFile.Logger.Info($"[TurnRewind] monster/turn pipeline is still active ({monsterState}); waiting before rewind.");
+                }
             }
             await AwaitProcessFrame();
         }
         return false;
+    }
+
+    private static bool IsMonsterTurnPipelineIdle(out string state)
+    {
+        try
+        {
+            var combat = CombatManager.Instance.DebugOnlyGetState();
+            if (combat is null)
+            {
+                state = "combat-state unavailable";
+                return false;
+            }
+
+            var moving = combat.Enemies
+                .Where(creature => creature.Monster?.IsPerformingMove == true)
+                .Select(creature => creature.ModelId.Entry)
+                .ToList();
+            var manager = CombatManager.Instance;
+            var endingOne = GetRawMember(manager, "EndingPlayerTurnPhaseOne") as bool? ?? false;
+            var endingTwo = GetRawMember(manager, "EndingPlayerTurnPhaseTwo") as bool? ?? false;
+            var enemyTurnStarted = GetRawMember(manager, "IsEnemyTurnStarted") as bool? ?? false;
+            var playerSide = combat.CurrentSide == CombatSide.Player;
+            state = $"side={combat.CurrentSide}, enemyTurnStarted={enemyTurnStarted}, ending={endingOne}/{endingTwo}, moving=[{string.Join(',', moving)}]";
+
+            // Monster moves are ordinary async tasks rather than GameActions.  The
+            // action executor can therefore look idle while a move is still adding
+            // or removing powers (Spiny Toad/Toadpole thorns are a common case).
+            // Never mutate the combat graph in that window.
+            return playerSide && !enemyTurnStarted && !endingOne && !endingTwo && moving.Count == 0;
+        }
+        catch (Exception ex)
+        {
+            state = $"inspection failed: {ex.GetType().Name}";
+            return false;
+        }
     }
 
     private static bool IsCardVisualPipelineIdle(out string state)
@@ -1310,6 +1352,7 @@ internal static class SnapshotManager
             }
 
             var enemyNodes = allNodes.Where(node => node.Entity.Side == CombatSide.Enemy).ToList();
+            SynchronizeStatefulMonsterAnimations(enemyNodes);
             var encounterSlots = AccessTools.Field(typeof(NCombatRoom), "<EncounterSlots>k__BackingField")?.GetValue(room)
                 ?? AccessTools.Field(typeof(NCombatRoom), "EncounterSlots")?.GetValue(room);
             if (enemyNodes.Count > 0 && encounterSlots is null)
@@ -1324,6 +1367,51 @@ internal static class SnapshotManager
         catch (Exception ex)
         {
             MainFile.Logger.Warn($"[TurnRewind] creature visual rebuild failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void SynchronizeStatefulMonsterAnimations(IEnumerable<NCreature> enemyNodes)
+    {
+        foreach (var node in enemyNodes)
+        {
+            try
+            {
+                var monster = node.Entity.Monster;
+                if (monster is null)
+                    continue;
+
+                string? trigger = null;
+                if (string.Equals(monster.GetType().Name, "SpinyToad", StringComparison.Ordinal) &&
+                    (GetRawMember(monster, "IsSpiny") as bool? ?? GetRawMember(monster, "_isSpiny") as bool? ?? false))
+                {
+                    trigger = "Spiked";
+                }
+                else if (string.Equals(monster.GetType().Name, "Toadpole", StringComparison.Ordinal) &&
+                         node.Entity.Powers.Any(power => string.Equals(power.GetType().Name, "ThornsPower", StringComparison.Ordinal)))
+                {
+                    trigger = "Cast";
+                }
+
+                if (trigger is null)
+                    continue;
+
+                // These monsters encode their thorned/unthorned body in the
+                // animator rather than in the power icon. Recreating NCreature
+                // starts them in the unthorned idle even though the restored
+                // model already has Thorns. Re-enter the matching branch so the
+                // next attack/unspike transition starts from the correct state.
+                node.SetAnimationTrigger(trigger);
+                var animator = AccessTools.Field(typeof(NCreature), "_spineAnimator")?.GetValue(node);
+                var currentState = animator is null ? null : AccessTools.Field(animator.GetType(), "_currentState")?.GetValue(animator);
+                var settledState = currentState is null ? null : GetRawMember(currentState, "NextState");
+                if (animator is not null && settledState is not null)
+                    AccessTools.Method(animator.GetType(), "SetNextState")?.Invoke(animator, [settledState]);
+                MainFile.Logger.Info($"[TurnRewind] synchronized stateful monster animation {monster.Id}: trigger={trigger}.");
+            }
+            catch (Exception ex)
+            {
+                MainFile.Logger.Warn($"[TurnRewind] stateful monster animation synchronization failed: {ex.GetType().Name}: {ex.Message}");
+            }
         }
     }
 

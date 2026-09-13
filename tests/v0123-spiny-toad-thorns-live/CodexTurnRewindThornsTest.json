@@ -1,0 +1,1 @@
+{"id":"CodexTurnRewindThornsTest","name":"Codex Turn Rewind Thorns Test","author":"Codex","description":"Temporary live regression for thorn-monster rewind state and move race.","version":"0.1.0","min_game_version":"0.103.2","has_pck":false,"has_dll":true,"dependencies":["TurnRewind"],"affects_gameplay":false}
