@@ -1,6 +1,22 @@
 # 回合回溯 / TurnRewind
 
+> 项目分类：个人项目 / Slay the Spire 2 Mod / 可直接使用
+
 《杀戮尖塔 2》战斗回合快照与回溯模组。战斗界面显示最多十个回合节点，长按节点可恢复该回合开始时的战斗状态。
+
+## 下载与安装
+
+请从 [GitHub Releases](https://github.com/Yummn/sts2-turn-rewind/releases) 下载与你的游戏平台和游戏版本对应的 ZIP。
+
+- 手机启动器：可以直接导入完整 ZIP。
+- 手动安装：将 ZIP 内的 `TurnRewind` 文件夹完整复制到游戏 `mods` 目录。
+- 不同游戏版本必须使用对应安装包，不能混用 DLL。
+
+## 兼容版本
+
+- Android v0.103.2：使用文件名含“手机-v103”的压缩包。
+- Android v0.110.1：使用文件名含“手机-v110.1”的压缩包。
+- PC v0.107.1：使用文件名含“电脑-v107.1”的压缩包。
 
 ## 最新版本
 
@@ -21,19 +37,6 @@
 - [v0.1.14](https://github.com/Yummn/sts2-turn-rewind/releases/tag/v0.1.14)：修复回溯时怪物数量、身份、顺序和 Buff/Debuff 恢复错误。
 - [v0.1.13](https://github.com/Yummn/sts2-turn-rewind/releases/tag/v0.1.13)：修复机器人充能球快照恢复与视觉模型错位。
 
-## 兼容版本
-
-- Android v0.103.2：使用文件名含“手机-v103”的压缩包。
-- Android v0.110.1：使用文件名含“手机-v110.1”的压缩包。
-- PC v0.107.1：使用文件名含“电脑-v107.1”的压缩包。
-
-## 安装
-
-下载对应 Release 中的 ZIP。手机启动器可直接导入完整 ZIP；手动安装时，将 ZIP 内的 `TurnRewind` 文件夹完整复制到游戏 `mods` 目录。
-
-不同游戏版本必须使用对应安装包，不能混用 DLL。
-
 ## 旧版本
 
 GitHub Releases 保留历史版本；本地模组库只维护每个平台的最新版。
-
