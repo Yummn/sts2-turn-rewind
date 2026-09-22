@@ -16,7 +16,7 @@ public partial class MainFile : Node
     {
         new Harmony(ModId).PatchAll();
         SnapshotManager.Initialize();
-        Logger.Info("[TurnRewind] loaded v0.1.23: monster-turn async safety and thorn-monster model/animation state restore.");
+        Logger.Info("[TurnRewind] loaded v0.1.24: exact monster positions, cumulative card runtime state and history-card identity restore.");
     }
 }
 

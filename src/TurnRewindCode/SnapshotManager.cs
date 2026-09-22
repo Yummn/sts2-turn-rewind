@@ -54,6 +54,24 @@ public sealed class CardLineageSnapshot
     public CardModel? DeckVersion { get; init; }
     public EnchantmentStatus? EnchantmentStatus { get; init; }
     public bool? GlamUsedThisCombat { get; init; }
+    public required List<CardRuntimeFieldSnapshot> RuntimeFields { get; init; }
+    public required Dictionary<string, DynamicVarValueSnapshot> DynamicVars { get; init; }
+    public required List<CardRuntimeFieldSnapshot> DeckVersionRuntimeFields { get; init; }
+    public required Dictionary<string, DynamicVarValueSnapshot> DeckVersionDynamicVars { get; init; }
+}
+
+public sealed class CardRuntimeFieldSnapshot
+{
+    public required string DeclaringType { get; init; }
+    public required string FieldName { get; init; }
+    public object? Value { get; init; }
+}
+
+public sealed class DynamicVarValueSnapshot
+{
+    public required decimal BaseValue { get; init; }
+    public required decimal EnchantedValue { get; init; }
+    public required decimal PreviewValue { get; init; }
 }
 
 public sealed class PlayerRelicSnapshot
@@ -91,6 +109,8 @@ public sealed class CreatureExtraSnapshot
     public bool? IsPerformingMove { get; init; }
     public required bool IsStunned { get; init; }
     public required List<MonsterRuntimeFieldSnapshot> MonsterRuntimeFields { get; init; }
+    public Vector2? VisualGlobalPosition { get; init; }
+    public Vector2? VisualScale { get; init; }
 }
 
 public sealed class MonsterRuntimeFieldSnapshot
@@ -643,9 +663,10 @@ internal static class SnapshotManager
         // Death, summon and stun animations live on NCreature nodes rather
         // than in CombatState and otherwise survive the model rollback.
         MainFile.Logger.Info($"[TurnRewind] apply state: rebuilding creature visuals (rosterChanged={rosterChanged}).");
-        RebuildNonPlayerCreatureNodes(state);
+        RebuildNonPlayerCreatureNodes(state, snapshot.CreatureExtras);
         MainFile.Logger.Info("[TurnRewind] apply state: restoring players.");
         RestorePlayers(state, snapshot);
+        RemapCombatHistoryCards(snapshot, state);
         // CombatHistory listeners fired earlier while the old hand/card nodes
         // were still attached. Re-synchronize mod counters, recalculate cards,
         // then emit Changed again so FTL-style play-count conditions and their
@@ -677,6 +698,7 @@ internal static class SnapshotManager
             var creature = creatures[i];
             var monster = creature.Monster;
             var machine = monster?.MoveStateMachine;
+            var visualNode = NCombatRoom.Instance?.GetCreatureNode(creature);
             result.Add(new CreatureExtraSnapshot
             {
                 Index = i,
@@ -696,7 +718,9 @@ internal static class SnapshotManager
                 SpawnedThisTurn = monster?.SpawnedThisTurn,
                 IsPerformingMove = monster?.IsPerformingMove,
                 IsStunned = creature.IsStunned,
-                MonsterRuntimeFields = monster is null ? [] : CaptureMonsterRuntimeFields(monster)
+                MonsterRuntimeFields = monster is null ? [] : CaptureMonsterRuntimeFields(monster),
+                VisualGlobalPosition = visualNode?.GlobalPosition,
+                VisualScale = visualNode?.Scale
             });
         }
         return result;
@@ -726,6 +750,90 @@ internal static class SnapshotManager
         {
             MainFile.Logger.Warn($"[TurnRewind] combat history restore failed: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    private static void RemapCombatHistoryCards(TurnSnapshot snapshot, CombatState state)
+    {
+        try
+        {
+            var currentByToken = new Dictionary<string, CardModel>(StringComparer.Ordinal);
+            foreach (var card in state.Players
+                         .Where(player => player.PlayerCombatState is not null)
+                         .SelectMany(player => player.PlayerCombatState!.AllPiles)
+                         .SelectMany(pile => pile.Cards))
+            {
+                if (_cardLineageTokens.TryGetValue(card, out var token))
+                    currentByToken[token.Id] = card;
+            }
+
+            var replacements = 0;
+            foreach (var entry in snapshot.CombatHistoryEntries)
+            {
+                replacements += RemapCardReferences(
+                    entry,
+                    currentByToken,
+                    new HashSet<object>(ReferenceEqualityComparer.Instance),
+                    depth: 0);
+            }
+
+            if (replacements > 0)
+                MainFile.Logger.Info($"[TurnRewind] remapped combat-history card references: {replacements}.");
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[TurnRewind] combat-history card remap failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static int RemapCardReferences(
+        object value,
+        IReadOnlyDictionary<string, CardModel> currentByToken,
+        HashSet<object> visited,
+        int depth)
+    {
+        if (depth > 3 || !visited.Add(value))
+            return 0;
+
+        var replacements = 0;
+        var flags = System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.DeclaredOnly;
+        for (var type = value.GetType(); type is not null && type != typeof(object); type = type.BaseType)
+        {
+            foreach (var field in type.GetFields(flags))
+            {
+                object? child;
+                try { child = field.GetValue(value); }
+                catch { continue; }
+
+                if (child is CardModel oldCard)
+                {
+                    if (_cardLineageTokens.TryGetValue(oldCard, out var token) &&
+                        currentByToken.TryGetValue(token.Id, out var currentCard) &&
+                        !ReferenceEquals(oldCard, currentCard))
+                    {
+                        try
+                        {
+                            field.SetValue(value, currentCard);
+                            replacements++;
+                        }
+                        catch { }
+                    }
+                    continue;
+                }
+
+                if (child is null || child is string || child.GetType().IsValueType)
+                    continue;
+                var childNamespace = child.GetType().Namespace ?? string.Empty;
+                if (childNamespace.StartsWith("MegaCrit.Sts2.Core.Entities.Cards", StringComparison.Ordinal) ||
+                    childNamespace.StartsWith("MegaCrit.Sts2.Core.Combat.History", StringComparison.Ordinal))
+                {
+                    replacements += RemapCardReferences(child, currentByToken, visited, depth + 1);
+                }
+            }
+        }
+        return replacements;
     }
 
     private static void RefreshCardPlayCountersAfterRestore(CombatState state)
@@ -1323,7 +1431,7 @@ internal static class SnapshotManager
         }
     }
 
-    private static void RebuildNonPlayerCreatureNodes(CombatState state)
+    private static void RebuildNonPlayerCreatureNodes(CombatState state, IReadOnlyList<CreatureExtraSnapshot> snapshots)
     {
         var room = NCombatRoom.Instance;
         if (room is null)
@@ -1359,6 +1467,15 @@ internal static class SnapshotManager
             {
                 var scaling = state.Encounter?.GetCameraScaling() ?? 1f;
                 AccessTools.Method(typeof(NCombatRoom), "PositionEnemies")?.Invoke(room, [enemyNodes, scaling]);
+            }
+
+            foreach (var node in enemyNodes)
+            {
+                var saved = snapshots.FirstOrDefault(snapshot => ReferenceEquals(snapshot.Creature, node.Entity));
+                if (saved?.VisualGlobalPosition is { } globalPosition)
+                    node.GlobalPosition = globalPosition;
+                if (saved?.VisualScale is { } scale)
+                    node.Scale = scale;
             }
 
             AccessTools.Method(typeof(NCombatRoom), "UpdateCreatureNavigation")?.Invoke(room, null);
@@ -1491,7 +1608,11 @@ internal static class SnapshotManager
                         Token = token.Id,
                         DeckVersion = card.DeckVersion,
                         EnchantmentStatus = card.Enchantment?.Status,
-                        GlamUsedThisCombat = GetGlamUsedThisCombat(card)
+                        GlamUsedThisCombat = GetGlamUsedThisCombat(card),
+                        RuntimeFields = CaptureCardRuntimeFields(card),
+                        DynamicVars = CaptureDynamicVars(card),
+                        DeckVersionRuntimeFields = card.DeckVersion is null ? [] : CaptureCardRuntimeFields(card.DeckVersion),
+                        DeckVersionDynamicVars = card.DeckVersion is null ? [] : CaptureDynamicVars(card.DeckVersion)
                     });
                 }
             }
@@ -1544,6 +1665,13 @@ internal static class SnapshotManager
             _cardLineageTokens.Remove(card);
             _cardLineageTokens.Add(card, new CardLineageToken(saved.Token));
             card.DeckVersion = saved.DeckVersion;
+            RestoreCardRuntimeFields(card, saved.RuntimeFields);
+            RestoreDynamicVars(card, saved.DynamicVars);
+            if (card.DeckVersion is { } deckVersion)
+            {
+                RestoreCardRuntimeFields(deckVersion, saved.DeckVersionRuntimeFields);
+                RestoreDynamicVars(deckVersion, saved.DeckVersionDynamicVars);
+            }
 
             if (card.Enchantment is { } enchantment && saved.EnchantmentStatus.HasValue)
             {
@@ -1563,6 +1691,92 @@ internal static class SnapshotManager
         catch (Exception ex)
         {
             MainFile.Logger.Warn($"[TurnRewind] card lineage restore skipped for {card.Id}: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static List<CardRuntimeFieldSnapshot> CaptureCardRuntimeFields(CardModel card)
+    {
+        var result = new List<CardRuntimeFieldSnapshot>();
+        var flags = System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.DeclaredOnly;
+        for (var type = card.GetType(); type is not null && type != typeof(CardModel); type = type.BaseType)
+        {
+            foreach (var field in type.GetFields(flags))
+            {
+                if (field.IsStatic || field.IsLiteral || field.IsInitOnly || !CanSnapshotCardField(field.FieldType))
+                    continue;
+                try
+                {
+                    result.Add(new CardRuntimeFieldSnapshot
+                    {
+                        DeclaringType = field.DeclaringType?.AssemblyQualifiedName ?? type.AssemblyQualifiedName ?? type.FullName ?? type.Name,
+                        FieldName = field.Name,
+                        Value = field.GetValue(card)
+                    });
+                }
+                catch { }
+            }
+        }
+        return result;
+    }
+
+    private static bool CanSnapshotCardField(Type type)
+    {
+        var underlying = Nullable.GetUnderlyingType(type) ?? type;
+        return underlying.IsPrimitive || underlying.IsEnum || underlying == typeof(decimal) ||
+               underlying == typeof(string) || underlying == typeof(ModelId);
+    }
+
+    private static Dictionary<string, DynamicVarValueSnapshot> CaptureDynamicVars(CardModel card)
+    {
+        var result = new Dictionary<string, DynamicVarValueSnapshot>(StringComparer.Ordinal);
+        foreach (var pair in card.DynamicVars)
+        {
+            result[pair.Key] = new DynamicVarValueSnapshot
+            {
+                BaseValue = pair.Value.BaseValue,
+                EnchantedValue = pair.Value.EnchantedValue,
+                PreviewValue = pair.Value.PreviewValue
+            };
+        }
+        return result;
+    }
+
+    private static void RestoreCardRuntimeFields(CardModel card, IReadOnlyList<CardRuntimeFieldSnapshot> fields)
+    {
+        foreach (var saved in fields)
+        {
+            try
+            {
+                var declaringType = Type.GetType(saved.DeclaringType, throwOnError: false) ??
+                    FindType(saved.DeclaringType.Split(',')[0]);
+                var field = declaringType?.GetField(
+                    saved.FieldName,
+                    System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.DeclaredOnly);
+                if (field is not null && field.DeclaringType?.IsInstanceOfType(card) == true)
+                    field.SetValue(card, saved.Value);
+            }
+            catch (Exception ex)
+            {
+                MainFile.Logger.Warn($"[TurnRewind] failed to restore card field {saved.FieldName}: {ex.Message}");
+            }
+        }
+    }
+
+    private static void RestoreDynamicVars(CardModel card, IReadOnlyDictionary<string, DynamicVarValueSnapshot> values)
+    {
+        foreach (var pair in values)
+        {
+            if (!card.DynamicVars.TryGetValue(pair.Key, out var dynamicVar))
+                continue;
+            dynamicVar.BaseValue = pair.Value.BaseValue;
+            dynamicVar.EnchantedValue = pair.Value.EnchantedValue;
+            dynamicVar.PreviewValue = pair.Value.PreviewValue;
         }
     }
 
