@@ -20,6 +20,8 @@
 
 ## 最新版本
 
+- [v0.1.27](https://github.com/Yummn/sts2-turn-rewind/releases/tag/v0.1.27)：检查全局费用与临时力量、敏捷、集中能力；补齐星能费用的基础值和临时修正快照。Android v0.110.1 与 PC v0.107.1 编译通过，真实对局验证待完成。
+
 - [v0.1.26](https://github.com/Yummn/sts2-turn-rewind/releases/tag/v0.1.26)：精确恢复卡牌本地费用修正链，修复带刺手甲等全局费用遗物在回溯后重复加费；能力按快照直接重建，不再重放施加钩子，修复柔韧等临时力量/敏捷效果在回溯后消失或重复结算。仅生成 Android v0.110.1 与 PC v0.107.1 安装包。
 
 - [v0.1.25](https://github.com/Yummn/sts2-turn-rewind/releases/tag/v0.1.25)：修复 Glam 等“每场战斗仅触发一次”附魔没有随目标回合恢复的问题。回到实际触发前会重新可用，回到触发后仍保持已消耗。Android v0.110.1 已通过真实附魔出牌和前后快照双向回溯测试；本次仅生成 Android v0.110.1 与 PC v0.107.1 安装包。

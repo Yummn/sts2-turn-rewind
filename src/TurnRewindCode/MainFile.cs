@@ -16,6 +16,6 @@ public partial class MainFile : Node
     {
         new Harmony(ModId).PatchAll();
         SnapshotManager.Initialize();
-        Logger.Info("[TurnRewind] loaded v0.1.26: exact local card costs and temporary Strength/Dexterity powers now follow the selected turn snapshot.");
+        Logger.Info("[TurnRewind] loaded v0.1.27: exact energy and star cost layers and temporary power state now follow the selected turn snapshot.");
     }
 }

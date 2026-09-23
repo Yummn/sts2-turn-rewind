@@ -55,6 +55,7 @@ public sealed class CardLineageSnapshot
     public EnchantmentStatus? EnchantmentStatus { get; init; }
     public bool? GlamUsedThisCombat { get; init; }
     public required CardEnergyCostSnapshot EnergyCost { get; init; }
+    public required CardStarCostSnapshot StarCost { get; init; }
     public required List<CardRuntimeFieldSnapshot> RuntimeFields { get; init; }
     public required Dictionary<string, DynamicVarValueSnapshot> DynamicVars { get; init; }
     public required List<CardRuntimeFieldSnapshot> DeckVersionRuntimeFields { get; init; }
@@ -75,6 +76,21 @@ public sealed class LocalCostModifierSnapshot
     public required LocalCostType Type { get; init; }
     public required LocalCostModifierExpiration Expiration { get; init; }
     public required bool IsReduceOnly { get; init; }
+}
+
+public sealed class CardStarCostSnapshot
+{
+    public required bool BaseCostSet { get; init; }
+    public required int BaseCost { get; init; }
+    public required bool WasJustUpgraded { get; init; }
+    public required List<TemporaryStarCostSnapshot> TemporaryCosts { get; init; }
+}
+
+public sealed class TemporaryStarCostSnapshot
+{
+    public required int Cost { get; init; }
+    public required bool ClearsWhenTurnEnds { get; init; }
+    public required bool ClearsWhenCardIsPlayed { get; init; }
 }
 
 public sealed class CardRuntimeFieldSnapshot
@@ -1328,12 +1344,11 @@ internal static class SnapshotManager
         {
             try
             {
-                // Do not use ApplyInternal here. Temporary Strength/Dexterity
-                // powers apply their companion stat power from BeforeApplied;
-                // replaying that hook while also restoring the saved stat power
-                // either doubles the stat or consumes/removes the temporary
-                // marker. Reattach the exact saved power state without gameplay
-                // hooks, then let ApplyPowerInternal notify the UI only.
+                // Restore the saved amount before notifying creature listeners.
+                // ApplyInternal would notify an amount change while this power
+                // is not yet in the creature's power list. The paired stat and
+                // temporary marker are both present in the snapshot, so neither
+                // needs to be reapplied through PowerCmd gameplay hooks.
                 var power = ModelDb.GetById<PowerModel>(saved.Id).ToMutable();
                 AccessTools.Field(typeof(PowerModel), "_owner")?.SetValue(power, creature);
                 AccessTools.Field(typeof(PowerModel), "_amount")?.SetValue(power, saved.Amount);
@@ -1628,6 +1643,7 @@ internal static class SnapshotManager
                         EnchantmentStatus = card.Enchantment?.Status,
                         GlamUsedThisCombat = GetGlamUsedThisCombat(card),
                         EnergyCost = CaptureCardEnergyCost(card),
+                        StarCost = CaptureCardStarCost(card),
                         RuntimeFields = CaptureCardRuntimeFields(card),
                         DynamicVars = CaptureDynamicVars(card),
                         DeckVersionRuntimeFields = card.DeckVersion is null ? [] : CaptureCardRuntimeFields(card.DeckVersion),
@@ -1668,6 +1684,7 @@ internal static class SnapshotManager
             RestoreCardRuntimeFields(card, saved.RuntimeFields);
             RestoreDynamicVars(card, saved.DynamicVars);
             RestoreCardEnergyCost(card, saved.EnergyCost);
+            RestoreCardStarCost(card, saved.StarCost);
             if (card.DeckVersion is { } deckVersion)
             {
                 RestoreCardRuntimeFields(deckVersion, saved.DeckVersionRuntimeFields);
@@ -1738,6 +1755,56 @@ internal static class SnapshotManager
         catch (Exception ex)
         {
             MainFile.Logger.Warn($"[TurnRewind] failed to restore exact energy cost for {card.Id}: {ex.Message}");
+        }
+    }
+
+    private static CardStarCostSnapshot CaptureCardStarCost(CardModel card)
+    {
+        var type = typeof(CardModel);
+        var temporaryCosts = new List<TemporaryStarCostSnapshot>();
+        if (AccessTools.Field(type, "_temporaryStarCosts")?.GetValue(card) is IEnumerable costs)
+        {
+            foreach (var cost in costs.OfType<TemporaryCardCost>())
+            {
+                temporaryCosts.Add(new TemporaryStarCostSnapshot
+                {
+                    Cost = cost.Cost,
+                    ClearsWhenTurnEnds = cost.ClearsWhenTurnEnds,
+                    ClearsWhenCardIsPlayed = cost.ClearsWhenCardIsPlayed
+                });
+            }
+        }
+
+        return new CardStarCostSnapshot
+        {
+            BaseCostSet = AccessTools.Field(type, "_starCostSet")?.GetValue(card) as bool? ?? false,
+            BaseCost = AccessTools.Field(type, "_baseStarCost")?.GetValue(card) as int? ?? card.CanonicalStarCost,
+            WasJustUpgraded = card.WasStarCostJustUpgraded,
+            TemporaryCosts = temporaryCosts
+        };
+    }
+
+    private static void RestoreCardStarCost(CardModel card, CardStarCostSnapshot saved)
+    {
+        try
+        {
+            var type = typeof(CardModel);
+            AccessTools.Field(type, "_starCostSet")?.SetValue(card, saved.BaseCostSet);
+            AccessTools.Field(type, "_baseStarCost")?.SetValue(card, saved.BaseCost);
+            AccessTools.Field(type, "_wasStarCostJustUpgraded")?.SetValue(card, saved.WasJustUpgraded);
+            var costs = saved.TemporaryCosts.Select(cost =>
+                cost.ClearsWhenTurnEnds
+                    ? TemporaryCardCost.ThisTurn(cost.Cost)
+                    : cost.ClearsWhenCardIsPlayed
+                        ? TemporaryCardCost.UntilPlayed(cost.Cost)
+                        : TemporaryCardCost.ThisCombat(cost.Cost)).ToList();
+            AccessTools.Field(type, "_temporaryStarCosts")?.SetValue(card, costs);
+            var changedDelegate = AccessTools.Field(type, "StarCostChanged")?.GetValue(card) as Delegate;
+            changedDelegate?.DynamicInvoke();
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[TurnRewind] failed to restore exact star cost for {card.Id}: {ex.Message}");
         }
     }
 
