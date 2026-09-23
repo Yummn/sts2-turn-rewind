@@ -173,7 +173,6 @@ internal static class SnapshotManager
     private static string? _lastCaptureKey;
     private sealed class CardLineageToken(string id) { public string Id { get; } = id; }
     private static ConditionalWeakTable<CardModel, CardLineageToken> _cardLineageTokens = new();
-    private static readonly HashSet<string> _consumedCombatEnchantments = [];
     private static readonly System.Reflection.PropertyInfo? CanUseOrRemovePotionsProperty =
         AccessTools.Property(typeof(Player), "CanUseOrRemovePotions") ??
         AccessTools.Property(typeof(Player), "CanRemovePotions");
@@ -331,7 +330,6 @@ internal static class SnapshotManager
         _lastCaptureKey = null;
         _restorePending = false;
         _cardLineageTokens = new ConditionalWeakTable<CardModel, CardLineageToken>();
-        _consumedCombatEnchantments.Clear();
         RewindBar.RefreshAllBars();
     }
 
@@ -360,7 +358,6 @@ internal static class SnapshotManager
                 return;
 
             _restoring = true;
-            RememberConsumedCombatEnchantments(state);
             MainFile.Logger.Info($"[TurnRewind] safe action boundary reached; restoring snapshot seq={snapshot.Sequence}, turn={snapshot.PlayerTurnNumber}.");
 
             // Stop the active executor/turn coroutine at the next pause point while we mutate the combat graph.
@@ -1620,25 +1617,6 @@ internal static class SnapshotManager
         return result;
     }
 
-    private static void RememberConsumedCombatEnchantments(CombatState state)
-    {
-        foreach (var player in state.Players)
-        {
-            if (player.PlayerCombatState is not { } pcs)
-                continue;
-            foreach (var card in pcs.AllPiles.SelectMany(p => p.Cards))
-            {
-                if (card.Enchantment is null)
-                    continue;
-                if (card.Enchantment.Status != EnchantmentStatus.Disabled && GetGlamUsedThisCombat(card) != true)
-                    continue;
-
-                var token = _cardLineageTokens.GetValue(card, _ => new CardLineageToken(Guid.NewGuid().ToString("N")));
-                _consumedCombatEnchantments.Add(token.Id);
-            }
-        }
-    }
-
     private static bool? GetGlamUsedThisCombat(CardModel card)
     {
         var enchantment = card.Enchantment;
@@ -1679,13 +1657,6 @@ internal static class SnapshotManager
                 if (saved.GlamUsedThisCombat.HasValue)
                     SetGlamUsedThisCombat(enchantment, saved.GlamUsedThisCombat.Value);
 
-                // Once-per-combat enchantments are monotonic. Rewinding card
-                // position/state must not grant their first-use effect again.
-                if (_consumedCombatEnchantments.Contains(saved.Token))
-                {
-                    enchantment.Status = EnchantmentStatus.Disabled;
-                    SetGlamUsedThisCombat(enchantment, true);
-                }
             }
         }
         catch (Exception ex)

@@ -1,0 +1,16 @@
+[INFO] Found mod manifest file /data/user/0/com.megacrit.sts2re/files/mods/CodexAutoLoad/CodexAutoLoad.json
+[INFO] Found mod manifest file /data/user/0/com.megacrit.sts2re/files/mods/CodexTurnRewindGlamSnapshotTest/CodexTurnRewindGlamSnapshotTest.json
+[INFO]   9: Codex Auto Load Test Bridge (CodexAutoLoad)
+[INFO]   10: Codex Turn Rewind Glam Snapshot Test (CodexTurnRewindGlamSnapshotTest)
+[INFO] [TurnRewind] [TurnRewind] loaded v0.1.25: once-per-combat Glam enchantment availability now follows the selected turn snapshot.
+[INFO] Loading assembly DLL /data/user/0/com.megacrit.sts2re/files/mods/CodexAutoLoad/CodexAutoLoad.dll
+[INFO] Calling initializer method of type CodexAutoLoad.MainFile for CodexAutoLoad, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
+[INFO] [CodexAutoLoad] [CodexAutoLoad] test bridge loaded.
+[INFO] Finished mod initialization for 'Codex Auto Load Test Bridge' (CodexAutoLoad).
+[INFO] Loading assembly DLL /data/user/0/com.megacrit.sts2re/files/mods/CodexTurnRewindGlamSnapshotTest/CodexTurnRewindGlamSnapshotTest.dll
+[INFO] Calling initializer method of type CodexTurnRewindGlamSnapshotTest.MainFile for CodexTurnRewindGlamSnapshotTest, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null
+[INFO] Finished mod initialization for 'Codex Turn Rewind Glam Snapshot Test' (CodexTurnRewindGlamSnapshotTest).
+[INFO] [CodexAutoLoad] [CodexAutoLoad] invoking the game's Continue handler.
+[INFO] [CodexAutoLoad] [CodexAutoLoad] current run loaded for test.
+[INFO] [CodexAutoLoad] [CodexAutoLoad] forced multi-enemy fight success=True message=Jumped to encounter: 'SLIMES_NORMAL'
+[INFO] [CodexTurnRewindGlamSnapshotTest] [CodexTurnRewindGlamSnapshotTest] PASS: real Glam play consumed once; rewind before play restored availability; rewind after play retained consumption.
