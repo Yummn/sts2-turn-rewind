@@ -54,10 +54,27 @@ public sealed class CardLineageSnapshot
     public CardModel? DeckVersion { get; init; }
     public EnchantmentStatus? EnchantmentStatus { get; init; }
     public bool? GlamUsedThisCombat { get; init; }
+    public required CardEnergyCostSnapshot EnergyCost { get; init; }
     public required List<CardRuntimeFieldSnapshot> RuntimeFields { get; init; }
     public required Dictionary<string, DynamicVarValueSnapshot> DynamicVars { get; init; }
     public required List<CardRuntimeFieldSnapshot> DeckVersionRuntimeFields { get; init; }
     public required Dictionary<string, DynamicVarValueSnapshot> DeckVersionDynamicVars { get; init; }
+}
+
+public sealed class CardEnergyCostSnapshot
+{
+    public required int BaseCost { get; init; }
+    public required int CapturedXValue { get; init; }
+    public required bool WasJustUpgraded { get; init; }
+    public required List<LocalCostModifierSnapshot> LocalModifiers { get; init; }
+}
+
+public sealed class LocalCostModifierSnapshot
+{
+    public required int Amount { get; init; }
+    public required LocalCostType Type { get; init; }
+    public required LocalCostModifierExpiration Expiration { get; init; }
+    public required bool IsReduceOnly { get; init; }
 }
 
 public sealed class CardRuntimeFieldSnapshot
@@ -1311,17 +1328,21 @@ internal static class SnapshotManager
         {
             try
             {
-                // ToMutable(saved.Amount) changes the amount before Owner is set.
-                // PowerModel.SetAmount then calls Owner.InvokePowerModified and
-                // throws NullReferenceException for every non-zero buff/debuff.
-                // Create at zero, attach it silently, then restore turn metadata.
+                // Do not use ApplyInternal here. Temporary Strength/Dexterity
+                // powers apply their companion stat power from BeforeApplied;
+                // replaying that hook while also restoring the saved stat power
+                // either doubles the stat or consumes/removes the temporary
+                // marker. Reattach the exact saved power state without gameplay
+                // hooks, then let ApplyPowerInternal notify the UI only.
                 var power = ModelDb.GetById<PowerModel>(saved.Id).ToMutable();
-                power.ApplyInternal(creature, saved.Amount, silent: true);
-                power.AmountOnTurnStart = saved.AmountOnTurnStart;
-                power.SkipNextDurationTick = saved.SkipNextDurationTick;
+                AccessTools.Field(typeof(PowerModel), "_owner")?.SetValue(power, creature);
+                AccessTools.Field(typeof(PowerModel), "_amount")?.SetValue(power, saved.Amount);
+                AccessTools.Field(typeof(PowerModel), "_amountOnTurnStart")?.SetValue(power, saved.AmountOnTurnStart);
+                AccessTools.Field(typeof(PowerModel), "_skipNextDurationTick")?.SetValue(power, saved.SkipNextDurationTick);
                 SetPropertyOrField(power, "_applier", saved.Applier);
                 SetPropertyOrField(power, "_target", saved.Target);
                 RestorePowerRuntimeFields(power, saved.RuntimeFields);
+                creature.ApplyPowerInternal(power);
             }
             catch (Exception ex)
             {
@@ -1606,6 +1627,7 @@ internal static class SnapshotManager
                         DeckVersion = card.DeckVersion,
                         EnchantmentStatus = card.Enchantment?.Status,
                         GlamUsedThisCombat = GetGlamUsedThisCombat(card),
+                        EnergyCost = CaptureCardEnergyCost(card),
                         RuntimeFields = CaptureCardRuntimeFields(card),
                         DynamicVars = CaptureDynamicVars(card),
                         DeckVersionRuntimeFields = card.DeckVersion is null ? [] : CaptureCardRuntimeFields(card.DeckVersion),
@@ -1645,6 +1667,7 @@ internal static class SnapshotManager
             card.DeckVersion = saved.DeckVersion;
             RestoreCardRuntimeFields(card, saved.RuntimeFields);
             RestoreDynamicVars(card, saved.DynamicVars);
+            RestoreCardEnergyCost(card, saved.EnergyCost);
             if (card.DeckVersion is { } deckVersion)
             {
                 RestoreCardRuntimeFields(deckVersion, saved.DeckVersionRuntimeFields);
@@ -1662,6 +1685,59 @@ internal static class SnapshotManager
         catch (Exception ex)
         {
             MainFile.Logger.Warn($"[TurnRewind] card lineage restore skipped for {card.Id}: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static CardEnergyCostSnapshot CaptureCardEnergyCost(CardModel card)
+    {
+        var cost = card.EnergyCost;
+        var modifiers = new List<LocalCostModifierSnapshot>();
+        if (AccessTools.Field(typeof(CardEnergyCost), "_localModifiers")?.GetValue(cost) is IEnumerable localModifiers)
+        {
+            foreach (var item in localModifiers)
+            {
+                if (item is not LocalCostModifier modifier)
+                    continue;
+                modifiers.Add(new LocalCostModifierSnapshot
+                {
+                    Amount = modifier.Amount,
+                    Type = modifier.Type,
+                    Expiration = modifier.Expiration,
+                    IsReduceOnly = modifier.IsReduceOnly
+                });
+            }
+        }
+
+        return new CardEnergyCostSnapshot
+        {
+            BaseCost = AccessTools.Field(typeof(CardEnergyCost), "_base")?.GetValue(cost) as int? ?? cost.Canonical,
+            CapturedXValue = AccessTools.Field(typeof(CardEnergyCost), "_capturedXValue")?.GetValue(cost) as int? ?? 0,
+            WasJustUpgraded = cost.WasJustUpgraded,
+            LocalModifiers = modifiers
+        };
+    }
+
+    private static void RestoreCardEnergyCost(CardModel card, CardEnergyCostSnapshot saved)
+    {
+        try
+        {
+            var cost = card.EnergyCost;
+            AccessTools.Field(typeof(CardEnergyCost), "_base")?.SetValue(cost, saved.BaseCost);
+            AccessTools.Field(typeof(CardEnergyCost), "_capturedXValue")?.SetValue(cost, saved.CapturedXValue);
+            AccessTools.Field(typeof(CardEnergyCost), "<WasJustUpgraded>k__BackingField")?.SetValue(cost, saved.WasJustUpgraded);
+            var restoredModifiers = saved.LocalModifiers
+                .Select(modifier => new LocalCostModifier(
+                    modifier.Amount,
+                    modifier.Type,
+                    modifier.Expiration,
+                    modifier.IsReduceOnly))
+                .ToList();
+            AccessTools.Field(typeof(CardEnergyCost), "_localModifiers")?.SetValue(cost, restoredModifiers);
+            card.InvokeEnergyCostChanged();
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[TurnRewind] failed to restore exact energy cost for {card.Id}: {ex.Message}");
         }
     }
 

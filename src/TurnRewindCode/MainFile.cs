@@ -16,14 +16,6 @@ public partial class MainFile : Node
     {
         new Harmony(ModId).PatchAll();
         SnapshotManager.Initialize();
-        Logger.Info("[TurnRewind] loaded v0.1.25: once-per-combat Glam enchantment availability now follows the selected turn snapshot.");
+        Logger.Info("[TurnRewind] loaded v0.1.26: exact local card costs and temporary Strength/Dexterity powers now follow the selected turn snapshot.");
     }
 }
-
-
-
-
-
-
-
-
