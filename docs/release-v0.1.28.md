@@ -16,6 +16,8 @@
 
 ## 安装包
 
+后续 [PC 实战补充验证](https://github.com/Yummn/sts2-turn-rewind/blob/main/docs/verification-v0.1.28-pc.md) 已覆盖带刺手甲全局加费、混合本地费用和星能费用，并列出复杂能力状态的未覆盖范围。发布 DLL 未变。
+
 - `回合回溯-v0.1.28-手机-v110.1.zip`
 - `回合回溯-v0.1.28-电脑-v107.1.zip`
 
