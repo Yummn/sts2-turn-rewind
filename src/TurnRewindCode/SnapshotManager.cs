@@ -162,6 +162,8 @@ public sealed class PowerExtraSnapshot
     public Creature? Applier { get; init; }
     public Creature? Target { get; init; }
     public required List<PowerRuntimeFieldSnapshot> RuntimeFields { get; init; }
+    public required List<PowerRuntimeFieldSnapshot> InternalDataFields { get; init; }
+    public required Dictionary<string, DynamicVarValueSnapshot> DynamicVars { get; init; }
 }
 
 public sealed class PowerRuntimeFieldSnapshot
@@ -1005,8 +1007,58 @@ internal static class SnapshotManager
             SkipNextDurationTick = power.SkipNextDurationTick,
             Applier = GetMember<Creature>(power, "Applier", "_applier"),
             Target = GetMember<Creature>(power, "Target", "_target"),
-            RuntimeFields = CapturePowerRuntimeFields(power)
+            RuntimeFields = CapturePowerRuntimeFields(power),
+            InternalDataFields = CapturePowerInternalDataFields(power),
+            DynamicVars = CapturePowerDynamicVars(power)
         };
+    }
+
+    private static Dictionary<string, DynamicVarValueSnapshot> CapturePowerDynamicVars(PowerModel power)
+    {
+        var result = new Dictionary<string, DynamicVarValueSnapshot>(StringComparer.Ordinal);
+        foreach (var pair in power.DynamicVars)
+        {
+            result[pair.Key] = new DynamicVarValueSnapshot
+            {
+                BaseValue = pair.Value.BaseValue,
+                EnchantedValue = pair.Value.EnchantedValue,
+                PreviewValue = pair.Value.PreviewValue
+            };
+        }
+        return result;
+    }
+
+    private static List<PowerRuntimeFieldSnapshot> CapturePowerInternalDataFields(PowerModel power)
+    {
+        var data = AccessTools.Field(typeof(PowerModel), "_internalData")?.GetValue(power);
+        if (data is null)
+            return [];
+
+        var fields = new List<PowerRuntimeFieldSnapshot>();
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.NonPublic |
+            System.Reflection.BindingFlags.DeclaredOnly;
+        for (var type = data.GetType(); type is not null && type != typeof(object); type = type.BaseType)
+        {
+            foreach (var field in type.GetFields(flags))
+            {
+                if (field.IsStatic || field.IsLiteral || !CanSnapshotPowerField(field.FieldType))
+                    continue;
+                try
+                {
+                    fields.Add(new PowerRuntimeFieldSnapshot
+                    {
+                        DeclaringType = field.DeclaringType?.AssemblyQualifiedName ?? type.AssemblyQualifiedName ?? type.FullName ?? type.Name,
+                        FieldName = field.Name,
+                        Value = field.GetValue(data)
+                    });
+                }
+                catch { }
+            }
+        }
+        return fields;
     }
 
     private static List<PowerRuntimeFieldSnapshot> CapturePowerRuntimeFields(PowerModel power)
@@ -1357,6 +1409,8 @@ internal static class SnapshotManager
                 SetPropertyOrField(power, "_applier", saved.Applier);
                 SetPropertyOrField(power, "_target", saved.Target);
                 RestorePowerRuntimeFields(power, saved.RuntimeFields);
+                RestorePowerInternalDataFields(power, saved.InternalDataFields);
+                RestorePowerDynamicVars(power, saved.DynamicVars);
                 creature.ApplyPowerInternal(power);
             }
             catch (Exception ex)
@@ -1407,6 +1461,50 @@ internal static class SnapshotManager
             {
                 MainFile.Logger.Warn($"[TurnRewind] failed to restore power field {saved.FieldName}: {ex.Message}");
             }
+        }
+    }
+
+    private static void RestorePowerInternalDataFields(PowerModel power, IReadOnlyList<PowerRuntimeFieldSnapshot> fields)
+    {
+        if (fields.Count == 0)
+            return;
+        var data = AccessTools.Field(typeof(PowerModel), "_internalData")?.GetValue(power);
+        if (data is null)
+        {
+            MainFile.Logger.Warn($"[TurnRewind] internal data missing while restoring {power.Id}.");
+            return;
+        }
+        foreach (var saved in fields)
+        {
+            try
+            {
+                var declaringType = Type.GetType(saved.DeclaringType, throwOnError: false) ??
+                    FindType(saved.DeclaringType.Split(',')[0]);
+                var field = declaringType?.GetField(
+                    saved.FieldName,
+                    System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.DeclaredOnly);
+                if (field is not null && field.DeclaringType?.IsInstanceOfType(data) == true)
+                    field.SetValue(data, saved.Value);
+            }
+            catch (Exception ex)
+            {
+                MainFile.Logger.Warn($"[TurnRewind] failed to restore internal power field {power.Id}.{saved.FieldName}: {ex.Message}");
+            }
+        }
+    }
+
+    private static void RestorePowerDynamicVars(PowerModel power, IReadOnlyDictionary<string, DynamicVarValueSnapshot> vars)
+    {
+        foreach (var pair in vars)
+        {
+            if (!power.DynamicVars.TryGetValue(pair.Key, out var variable))
+                continue;
+            variable.BaseValue = pair.Value.BaseValue;
+            variable.EnchantedValue = pair.Value.EnchantedValue;
+            variable.PreviewValue = pair.Value.PreviewValue;
         }
     }
 
