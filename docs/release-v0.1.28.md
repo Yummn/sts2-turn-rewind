@@ -18,3 +18,5 @@
 
 - `回合回溯-v0.1.28-手机-v110.1.zip`
 - `回合回溯-v0.1.28-电脑-v107.1.zip`
+
+GitHub 上传接口会清理中文文件名，因此 Release 附件实际文件名使用 `TurnRewind-v0.1.28-Mobile-v110.1.zip` 与 `TurnRewind-v0.1.28-PC-v107.1.zip`，下载页面标签和本地归档仍为中文。
