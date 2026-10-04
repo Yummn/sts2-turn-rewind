@@ -20,8 +20,8 @@ def main() -> int:
     manifest = (source_root / "TurnRewind.json").read_text(encoding="utf-8")
 
     checks = {
-        "manifest version is v0.1.20": '"version": "v0.1.20"' in manifest,
-        "load log version is v0.1.20": "loaded v0.1.20" in main_file,
+        "manifest version is v0.1.30": '"version": "v0.1.30"' in manifest,
+        "load log version is v0.1.30": "loaded v0.1.30" in main_file,
         "snapshot stores complete combat history": "public required List<CombatHistoryEntry> CombatHistoryEntries" in source,
         "capture copies combat history entries": "CombatHistory.Instance" not in source and "CombatManager.Instance.History.Entries.ToList()" in source,
         "restore replaces combat history before player state": (
@@ -52,7 +52,7 @@ def main() -> int:
             and 'ReplaceCreatureSideList(state, "_enemies"' in source
         ),
         "next creature id is restored": '"_nextCreatureId")?.SetValue(state, snapshot.NextCreatureId)' in source,
-        "non-player visuals are rebuilt after every rewind": "RebuildNonPlayerCreatureNodes(state)" in source,
+        "non-player visuals are rebuilt after every rewind": "RebuildNonPlayerCreatureNodes(state, snapshot.CreatureExtras)" in source,
         "monster subclass runtime fields are snapshotted": (
             "MonsterRuntimeFieldSnapshot" in source
             and "CaptureMonsterRuntimeFields" in source
@@ -63,14 +63,15 @@ def main() -> int:
             and '"<NextMove>k__BackingField"' in source
             and "ForceCurrentState(restoredState)" not in source
         ),
-        "power is created at zero before owner attach": (
+        "power is attached without removal callbacks": (
             "ModelDb.GetById<PowerModel>(saved.Id).ToMutable();" in source
-            and "var power = ModelDb.GetById<PowerModel>(saved.Id).ToMutable(saved.Amount)" not in source
+            and "powerList.Clear();" in source
+            and "creature.ApplyPowerInternal(power);" in source
         ),
-        "power applies only after owner is supplied": "power.ApplyInternal(creature, saved.Amount, silent: true)" in source,
-        "power turn metadata is restored": (
-            "power.AmountOnTurnStart = saved.AmountOnTurnStart;" in source
-            and "power.SkipNextDurationTick = saved.SkipNextDurationTick;" in source
+        "power owner and turn metadata are restored": (
+            'AccessTools.Field(typeof(PowerModel), "_owner")?.SetValue(power, creature)' in source
+            and 'AccessTools.Field(typeof(PowerModel), "_amountOnTurnStart")?.SetValue(power, saved.AmountOnTurnStart)' in source
+            and 'AccessTools.Field(typeof(PowerModel), "_skipNextDurationTick")?.SetValue(power, saved.SkipNextDurationTick)' in source
         ),
         "power applier and target references are restored": (
             'SetPropertyOrField(power, "_applier", saved.Applier)' in source
@@ -106,6 +107,30 @@ def main() -> int:
             and 'AccessTools.Method(surrounded.GetType(), "FlipScale")' in source
             and "SyncCreaturePowerVisuals(creature);" in source
         ),
+        "v111 turn-state collections are cleared": (
+            'AccessTools.Field(typeof(CombatManager), "_turnState")' in source
+            and 'ClearMemberCollection(turnState, "PlayersReadyToEndTurn")' in source
+            and 'ClearMemberCollection(turnState, "PlayersReadyToBeginEnemyTurn")' in source
+            and 'ClearMemberCollection(turnState, "PlayersTakingExtraTurn")' in source
+        ),
+        "v111 end-turn flags are reset": (
+            'SetPropertyOrField(turnState, "EndingPlayerTurnPhaseOne", false)' in source
+            and 'SetPropertyOrField(turnState, "EndingPlayerTurnPhaseTwo", false)' in source
+            and 'SetPropertyOrField(turnState, "PendingLoss", null)' in source
+            and "ActionSynchronizerCombatState.PlayPhase" in source
+        ),
+        "sandpit restore does not launch asynchronous position update": (
+            "RestoreSandpitLayout(creature)" not in source
+            and "UpdateCreaturePositions" not in source
+        ),
+        "rewind UI uses long press": (
+            "HoldSeconds = 0.85" in (source_root / "TurnRewindCode" / "RewindBar.cs").read_text(encoding="utf-8")
+            and "SnapshotManager.Restore(snapshot);" in (source_root / "TurnRewindCode" / "RewindBar.cs").read_text(encoding="utf-8")
+        ),
+        "rewind UI drag moves panel instead of selecting a segment": (
+            "MovePanelBy" in (source_root / "TurnRewindCode" / "RewindBar.cs").read_text(encoding="utf-8")
+            and "SelectAt" not in (source_root / "TurnRewindCode" / "RewindBar.cs").read_text(encoding="utf-8")
+        ),
     }
 
     for binary in args.binary:
@@ -115,7 +140,7 @@ def main() -> int:
     passed = [name for name, ok in checks.items() if ok]
     failed = [name for name, ok in checks.items() if not ok]
     report = [
-        "TurnRewind v0.1.20 offline audit",
+        "TurnRewind v0.1.30 offline audit",
         f"Timestamp: {dt.datetime.now().astimezone().isoformat(timespec='seconds')}",
         f"Passed: {len(passed)}",
         f"Failed: {len(failed)}",
