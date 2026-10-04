@@ -214,6 +214,8 @@ internal static class SnapshotManager
 
     public static IReadOnlyList<TurnSnapshot> Snapshots => _snapshots;
 
+    public static bool IsRestoreBusy => _restoring || _restorePending;
+
     public static void Initialize()
     {
         if (_initialized)
@@ -1387,9 +1389,23 @@ internal static class SnapshotManager
 
     private static void RestorePowers(Creature creature, IReadOnlyList<PowerExtraSnapshot> powers)
     {
-        foreach (var power in creature.RemoveAllPowersInternalExcept().ToList())
+        // RemoveAllPowersInternalExcept calls PowerModel.RemoveInternal(),
+        // which invokes AfterRemoved on powers. SandpitPower treats removal as
+        // the real finisher and kills the player, so a rewind must detach the
+        // old list without running gameplay callbacks. The snapshot restores
+        // the authoritative power list immediately below.
+        var powerList = AccessTools.Field(typeof(Creature), "_powers")?.GetValue(creature) as IList<PowerModel>;
+        if (powerList is not null)
         {
-            // RemoveAllPowersInternalExcept already detaches; enumerating forces completion.
+            powerList.Clear();
+        }
+        else
+        {
+            foreach (var power in creature.RemoveAllPowersInternalExcept().ToList())
+            {
+                // Compatibility fallback for a future runtime that hides the
+                // backing list under a different field name.
+            }
         }
 
         foreach (var saved in powers)
@@ -1419,7 +1435,29 @@ internal static class SnapshotManager
             }
         }
 
+        RestoreSandpitLayout(creature);
         SyncCreaturePowerVisuals(creature);
+    }
+
+    private static void RestoreSandpitLayout(Creature creature)
+    {
+        foreach (var power in creature.Powers.Where(power => power.GetType().Name == "SandpitPower"))
+        {
+            try
+            {
+                // SandpitPower stores the initial target position and timing
+                // fields in the runtime-field snapshot. Re-run only its visual
+                // repositioning routine after those fields are restored; do not
+                // invoke AfterApplied/AfterRemoved, which changes game state.
+                var update = AccessTools.Method(power.GetType(), "UpdateCreaturePositions");
+                if (update?.Invoke(power, null) is Task task)
+                    TaskHelper.RunSafely(task);
+            }
+            catch (Exception ex)
+            {
+                MainFile.Logger.Warn($"[TurnRewind] sandpit visual synchronization skipped: {ex.Message}");
+            }
+        }
     }
 
     private static MonsterState? ResolveMonsterState(

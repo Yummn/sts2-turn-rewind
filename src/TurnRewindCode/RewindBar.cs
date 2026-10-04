@@ -1,4 +1,4 @@
-﻿using Godot;
+using Godot;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 
 namespace TurnRewind;
@@ -12,6 +12,8 @@ public partial class RewindBar : PanelContainer
     private HBoxContainer? _segments;
     private Label? _title;
     private Label? _counter;
+    private bool _dragging;
+    private int _selectedIndex = -1;
 
     public static void Attach(NCombatUi ui)
     {
@@ -30,20 +32,16 @@ public partial class RewindBar : PanelContainer
             AnchorBottom = 0f,
             OffsetLeft = -405f,
             OffsetRight = 405f,
-            // Keep the rewind bar below the game's top status strip.  It used to
-            // start around y=54 and could overlap HP/gold/relic icons at some
-            // resolutions; lowering it preserves the top bar and still leaves the
-            // combat board unobstructed.
             OffsetTop = 88f,
             OffsetBottom = 160f,
-            MouseFilter = MouseFilterEnum.Pass,
+            MouseFilter = MouseFilterEnum.Stop,
             ZIndex = 95
         };
         bar.Build();
         ui.AddChild(bar);
         Bars.Add(new WeakReference<RewindBar>(bar));
         bar.Refresh();
-        MainFile.Logger.Info("[TurnRewind] rewind bar attached to combat UI.");
+        MainFile.Logger.Info("[TurnRewind] drag-select rewind bar attached to combat UI.");
     }
 
     public static void RefreshAllBars()
@@ -61,7 +59,6 @@ public partial class RewindBar : PanelContainer
     {
         AddThemeStyleboxOverride("panel", new StyleBoxFlat
         {
-            // Warm hand-painted wood panel instead of a glossy/tech overlay.
             BgColor = new Color(0.255f, 0.135f, 0.055f, 0.94f),
             BorderColor = new Color(0.075f, 0.035f, 0.012f, 0.98f),
             BorderWidthLeft = 5,
@@ -81,7 +78,7 @@ public partial class RewindBar : PanelContainer
             ShadowOffset = new Vector2(2f, 3f)
         });
 
-        var root = new VBoxContainer { Name = "Root", MouseFilter = MouseFilterEnum.Pass };
+        var root = new VBoxContainer { Name = "Root", MouseFilter = MouseFilterEnum.Ignore };
         root.AddThemeConstantOverride("separation", 2);
         AddChild(root);
 
@@ -93,13 +90,11 @@ public partial class RewindBar : PanelContainer
         };
         header.AddThemeConstantOverride("separation", 8);
         root.AddChild(header);
-
-        var leftOrnament = MakeOrnament("◆");
-        header.AddChild(leftOrnament);
+        header.AddChild(MakeOrnament("◆"));
 
         _title = new Label
         {
-            Text = "↶ 回合回溯",
+            Text = "↶ 等待回合记录",
             HorizontalAlignment = HorizontalAlignment.Left,
             SizeFlagsHorizontal = SizeFlags.ExpandFill,
             MouseFilter = MouseFilterEnum.Ignore
@@ -112,7 +107,7 @@ public partial class RewindBar : PanelContainer
 
         _counter = new Label
         {
-            Text = "0/10",
+            Text = "等待中",
             HorizontalAlignment = HorizontalAlignment.Right,
             MouseFilter = MouseFilterEnum.Ignore
         };
@@ -121,19 +116,13 @@ public partial class RewindBar : PanelContainer
         _counter.AddThemeColorOverride("font_color", new Color(0.93f, 0.74f, 0.43f, 0.94f));
         _counter.AddThemeColorOverride("font_outline_color", new Color(0.08f, 0.025f, 0.005f, 0.95f));
         header.AddChild(_counter);
+        header.AddChild(MakeOrnament("◆"));
 
-        var rightOrnament = MakeOrnament("◆");
-        header.AddChild(rightOrnament);
-
-        _segments = new HBoxContainer { Name = "Segments", MouseFilter = MouseFilterEnum.Pass };
+        _segments = new HBoxContainer { Name = "Segments", MouseFilter = MouseFilterEnum.Ignore };
         _segments.AddThemeConstantOverride("separation", 5);
         root.AddChild(_segments);
-
         for (var i = 0; i < MaxSegments; i++)
-        {
-            var segment = new RewindSegment { Name = $"Segment{i}", SlotIndex = i };
-            _segments.AddChild(segment);
-        }
+            _segments.AddChild(new RewindSegment { Name = $"Segment{i}", SlotIndex = i });
     }
 
     public void Refresh()
@@ -142,18 +131,122 @@ public partial class RewindBar : PanelContainer
             return;
 
         var snapshots = SnapshotManager.Snapshots;
-        _title!.Text = snapshots.Count == 0 ? "↶ 等待回合记录" : "↶ 回合回溯";
-        if (_counter is not null)
-            _counter.Text = snapshots.Count == 0 ? "等待中" : $"{snapshots.Count}/10  长按返回";
+        _title!.Text = snapshots.Count == 0 ? "↶ 等待回合记录" : "↶ 拖动选择回溯回合";
+        _counter!.Text = snapshots.Count == 0 ? "等待中" : $"{snapshots.Count}/10  松手恢复";
+        if (_selectedIndex >= snapshots.Count)
+            _selectedIndex = snapshots.Count - 1;
 
         for (var i = 0; i < MaxSegments; i++)
         {
             if (_segments.GetChild(i) is RewindSegment segment)
             {
-                var snapshot = i < snapshots.Count ? snapshots[i] : null;
-                segment.SetSnapshot(snapshot);
+                segment.SetSnapshot(i < snapshots.Count ? snapshots[i] : null);
+                segment.SetSelected(i == _selectedIndex && _dragging);
             }
         }
+    }
+
+    public override void _GuiInput(InputEvent @event)
+    {
+        if (@event is InputEventMouseButton mouse && mouse.ButtonIndex == MouseButton.Left)
+        {
+            if (mouse.Pressed)
+                BeginDrag(mouse.Position);
+            else
+                EndDrag();
+            AcceptEvent();
+            return;
+        }
+
+        if (@event is InputEventScreenTouch touch)
+        {
+            if (touch.Pressed)
+                BeginDrag(touch.Position);
+            else
+                EndDrag();
+            AcceptEvent();
+            return;
+        }
+
+        if (@event is InputEventMouseMotion motion && _dragging)
+        {
+            SelectAt(motion.Position);
+            AcceptEvent();
+        }
+        else if (@event is InputEventScreenDrag drag && _dragging)
+        {
+            SelectAt(drag.Position);
+            AcceptEvent();
+        }
+    }
+
+    public override void _Input(InputEvent @event)
+    {
+        if (!_dragging)
+            return;
+
+        switch (@event)
+        {
+            case InputEventMouseMotion motion:
+                SelectAt(motion.Position);
+                GetViewport().SetInputAsHandled();
+                break;
+            case InputEventScreenDrag drag:
+                SelectAt(drag.Position);
+                GetViewport().SetInputAsHandled();
+                break;
+            case InputEventMouseButton mouse when mouse.ButtonIndex == MouseButton.Left && !mouse.Pressed:
+                EndDrag();
+                GetViewport().SetInputAsHandled();
+                break;
+            case InputEventScreenTouch touch when !touch.Pressed:
+                EndDrag();
+                GetViewport().SetInputAsHandled();
+                break;
+        }
+    }
+
+    private void BeginDrag(Vector2 screenPosition)
+    {
+        if (SnapshotManager.Snapshots.Count == 0 || SnapshotManager.IsRestoreBusy)
+            return;
+
+        _dragging = true;
+        SelectAt(screenPosition);
+        Refresh();
+    }
+
+    private void EndDrag()
+    {
+        if (!_dragging)
+            return;
+
+        _dragging = false;
+        var index = _selectedIndex;
+        var snapshot = index >= 0 && index < SnapshotManager.Snapshots.Count
+            ? SnapshotManager.Snapshots[index]
+            : null;
+        Refresh();
+        if (snapshot is not null)
+            SnapshotManager.Restore(snapshot);
+    }
+
+    private void SelectAt(Vector2 screenPosition)
+    {
+        if (_segments is null || SnapshotManager.Snapshots.Count == 0)
+            return;
+
+        var first = _segments.GetChild<Control>(0).GetGlobalRect();
+        var lastIndex = Math.Min(SnapshotManager.Snapshots.Count, MaxSegments) - 1;
+        var last = _segments.GetChild<Control>(lastIndex).GetGlobalRect();
+        var width = Math.Max(last.End.X - first.Position.X, 1f);
+        var ratio = Mathf.Clamp((screenPosition.X - first.Position.X) / width, 0f, 0.99999f);
+        _selectedIndex = Mathf.Clamp((int)(ratio * SnapshotManager.Snapshots.Count), 0, SnapshotManager.Snapshots.Count - 1);
+        for (var i = 0; i < MaxSegments; i++)
+            if (_segments.GetChild(i) is RewindSegment segment)
+                segment.SetSelected(i == _selectedIndex && _dragging);
+
+        _counter!.Text = $"回合 {SnapshotManager.Snapshots[_selectedIndex].PlayerTurnNumber} · 松手恢复";
     }
 
     private static Label MakeOrnament(string text)
@@ -174,16 +267,12 @@ public partial class RewindBar : PanelContainer
 
 public partial class RewindSegment : Button
 {
-    private const double HoldSeconds = 0.85;
-    private ColorRect? _fill;
     private Label? _caption;
     private Label? _smallCaption;
-    private bool _holding;
-    private double _held;
     private TurnSnapshot? _snapshot;
-    private string _snapshotLabel = "-";
     private StyleBoxFlat? _normalStyle;
     private StyleBoxFlat? _hoverStyle;
+    private StyleBoxFlat? _selectedStyle;
     private StyleBoxFlat? _disabledStyle;
 
     public int SlotIndex { get; set; }
@@ -192,57 +281,16 @@ public partial class RewindSegment : Button
     {
         ToggleMode = false;
         FocusMode = FocusModeEnum.None;
-        MouseFilter = MouseFilterEnum.Stop;
+        MouseFilter = MouseFilterEnum.Ignore;
         CustomMinimumSize = new Vector2(72f, 34f);
         SizeFlagsHorizontal = SizeFlags.ExpandFill;
         ClipContents = true;
         Text = "";
         BuildStyles();
 
-        _fill = new ColorRect
-        {
-            Name = "HoldFill",
-            AnchorLeft = 0f,
-            AnchorTop = 0f,
-            AnchorRight = 0f,
-            AnchorBottom = 1f,
-            // Draw the hold progress inside the button border.  Filling the full
-            // rect made the progress paint visually drift over the thick
-            // hand-drawn border on mobile.
-            OffsetLeft = 4f,
-            OffsetTop = 4f,
-            OffsetRight = 0f,
-            OffsetBottom = -4f,
-            // Long-press fill: muted ember paint, not neon progress.
-            Color = new Color(0.72f, 0.23f, 0.075f, 0.46f),
-            MouseFilter = MouseFilterEnum.Ignore,
-            ZIndex = 1
-        };
-        AddChild(_fill);
-
-        var shine = new ColorRect
-        {
-            Name = "TopShine",
-            AnchorLeft = 0f,
-            AnchorTop = 0f,
-            AnchorRight = 1f,
-            AnchorBottom = 0f,
-            OffsetLeft = 5f,
-            OffsetTop = 5f,
-            OffsetRight = -5f,
-            OffsetBottom = 8f,
-            // A flat painted highlight strip, deliberately low contrast.
-            Color = new Color(0.96f, 0.70f, 0.38f, 0.10f),
-            MouseFilter = MouseFilterEnum.Ignore,
-            ZIndex = 2
-        };
-        AddChild(shine);
-
         _caption = new Label
         {
             Name = "Caption",
-            AnchorLeft = 0f,
-            AnchorTop = 0f,
             AnchorRight = 1f,
             AnchorBottom = 1f,
             HorizontalAlignment = HorizontalAlignment.Center,
@@ -275,208 +323,57 @@ public partial class RewindSegment : Button
         _smallCaption.AddThemeColorOverride("font_color", new Color(0.96f, 0.64f, 0.30f, 0.80f));
         _smallCaption.AddThemeColorOverride("font_outline_color", new Color(0.06f, 0.018f, 0.004f, 0.95f));
         AddChild(_smallCaption);
-        SetSnapshot(_snapshot);
-    }
-
-    public override void _Process(double delta)
-    {
-        if (!_holding || _snapshot is null)
-            return;
-
-        if (!GetGlobalRect().Grow(8f).HasPoint(GetGlobalMousePosition()))
-        {
-            CancelHold();
-            return;
-        }
-
-        _held += delta;
-        UpdateHoldVisual();
-        if (_held >= HoldSeconds)
-        {
-            var snapshot = _snapshot;
-            CancelHold();
-            SnapshotManager.Restore(snapshot);
-        }
-    }
-
-    public override void _GuiInput(InputEvent @event)
-    {
-        if (_snapshot is null || Disabled)
-            return;
-
-        if (@event is InputEventMouseButton mouse && mouse.ButtonIndex == MouseButton.Left)
-        {
-            if (mouse.Pressed)
-                BeginHold();
-            else
-                CancelHold();
-            AcceptEvent();
-        }
-        else if (@event is InputEventMouseButton rightMouse && rightMouse.ButtonIndex == MouseButton.Right && rightMouse.Pressed)
-        {
-            // Desktop convenience path for testing with a mouse. Mobile still uses the required long-press gesture.
-            CancelHold();
-            SnapshotManager.Restore(_snapshot);
-            AcceptEvent();
-        }
-        else if (@event is InputEventScreenTouch touch)
-        {
-            if (touch.Pressed)
-                BeginHold();
-            else
-                CancelHold();
-            AcceptEvent();
-        }
-    }
-
-    public override void _Input(InputEvent @event)
-    {
-        if (_snapshot is null || Disabled)
-            return;
-
-        if (@event is InputEventMouseButton mouse)
-        {
-            var inside = GetGlobalRect().HasPoint(mouse.Position);
-            if (mouse.ButtonIndex == MouseButton.Left)
-            {
-                if (mouse.Pressed && inside)
-                {
-                    BeginHold();
-                    GetViewport().SetInputAsHandled();
-                }
-                else if (!mouse.Pressed && _holding)
-                {
-                    CancelHold();
-                    GetViewport().SetInputAsHandled();
-                }
-            }
-            else if (mouse.ButtonIndex == MouseButton.Right && mouse.Pressed && inside)
-            {
-                CancelHold();
-                SnapshotManager.Restore(_snapshot);
-                GetViewport().SetInputAsHandled();
-            }
-        }
-        else if (@event is InputEventScreenTouch touch)
-        {
-            var inside = GetGlobalRect().HasPoint(touch.Position);
-            if (touch.Pressed && inside)
-            {
-                BeginHold();
-                GetViewport().SetInputAsHandled();
-            }
-            else if (!touch.Pressed && _holding)
-            {
-                CancelHold();
-                GetViewport().SetInputAsHandled();
-            }
-        }
-    }
-
-    public override void _Notification(int what)
-    {
-        if (what == NotificationMouseExit)
-            CancelHold();
     }
 
     public void SetSnapshot(TurnSnapshot? snapshot)
     {
         _snapshot = snapshot;
         Disabled = snapshot is null;
-        _snapshotLabel = snapshot?.Label ?? "-";
-        if (_caption is not null)
-            _caption.Text = _snapshotLabel;
-        if (_smallCaption is not null)
-            _smallCaption.Text = snapshot is null ? "" : $"#{snapshot.Sequence}";
-        TooltipText = snapshot is null
-            ? "暂无回合快照"
-            : $"长按回到第 {snapshot.PlayerTurnNumber} 回合（记录 #{snapshot.Sequence}）";
-        CancelHold();
+        _caption!.Text = snapshot?.Label ?? "-";
+        _smallCaption!.Text = snapshot is null ? "" : $"#{snapshot.Sequence}";
+        TooltipText = snapshot is null ? "暂无回合快照" : "拖动到此回合，松手恢复";
         Modulate = snapshot is null ? new Color(1f, 1f, 1f, 0.34f) : Colors.White;
     }
 
-    private void BeginHold()
+    public void SetSelected(bool selected)
     {
-        _holding = true;
-        _held = 0;
-        AddThemeStyleboxOverride("normal", _hoverStyle);
-        AddThemeStyleboxOverride("hover", _hoverStyle);
-        UpdateHoldVisual();
-    }
-
-    private void CancelHold()
-    {
-        _holding = false;
-        _held = 0;
-        if (_normalStyle is not null)
-            AddThemeStyleboxOverride("normal", Disabled ? _disabledStyle : _normalStyle);
-        if (_fill is not null)
-            _fill.AnchorRight = 0f;
-        if (_caption is not null)
-        {
-            _caption.Text = _snapshotLabel;
-            _caption.Modulate = new Color(1f, 0.86f, 0.56f, 1f);
-        }
-        if (_smallCaption is not null)
-            _smallCaption.Visible = true;
-        // Do not scale Control nodes during touch-hold.  Godot scales controls
-        // around their origin by default, which makes the visual state drift away
-        // from the actual touch rect and looks like a misplaced long-press UI.
-        Scale = Vector2.One;
-        SelfModulate = Colors.White;
-    }
-
-    private void UpdateHoldVisual()
-    {
-        var progress = (float)Math.Clamp(_held / HoldSeconds, 0.0, 1.0);
-        if (_fill is not null)
-            _fill.AnchorRight = progress;
-        SelfModulate = new Color(1f, 0.98f, 0.92f, 1f);
-        if (_caption is not null)
-        {
-            _caption.Text = _snapshotLabel;
-            _caption.Modulate = new Color(1f, 0.93f, 0.64f, 1f);
-        }
-        if (_smallCaption is not null)
-        {
-            _smallCaption.Visible = true;
-            _smallCaption.Text = $"{Math.Round(progress * 100f):0}%";
-        }
+        AddThemeStyleboxOverride("normal", selected ? _selectedStyle : Disabled ? _disabledStyle : _normalStyle);
+        AddThemeStyleboxOverride("hover", selected ? _selectedStyle : _hoverStyle);
+        SelfModulate = selected ? new Color(1f, 1f, 0.88f, 1f) : Colors.White;
+        if (_smallCaption is not null && selected)
+            _smallCaption.Text = "松手";
     }
 
     private void BuildStyles()
     {
         _normalStyle = MakeStyle(new Color(0.43f, 0.245f, 0.095f, 0.96f), new Color(0.105f, 0.052f, 0.018f, 0.98f));
         _hoverStyle = MakeStyle(new Color(0.53f, 0.30f, 0.105f, 0.98f), new Color(0.16f, 0.075f, 0.024f, 1f));
+        _selectedStyle = MakeStyle(new Color(0.70f, 0.38f, 0.10f, 1f), new Color(0.98f, 0.72f, 0.30f, 1f));
         _disabledStyle = MakeStyle(new Color(0.15f, 0.105f, 0.075f, 0.66f), new Color(0.075f, 0.052f, 0.035f, 0.80f));
         AddThemeStyleboxOverride("normal", _normalStyle);
         AddThemeStyleboxOverride("hover", _hoverStyle);
-        AddThemeStyleboxOverride("pressed", _hoverStyle);
+        AddThemeStyleboxOverride("pressed", _selectedStyle);
         AddThemeStyleboxOverride("disabled", _disabledStyle);
     }
 
-    private static StyleBoxFlat MakeStyle(Color bg, Color border)
+    private static StyleBoxFlat MakeStyle(Color bg, Color border) => new()
     {
-        return new StyleBoxFlat
-        {
-            BgColor = bg,
-            BorderColor = border,
-            BorderWidthLeft = 4,
-            BorderWidthTop = 4,
-            BorderWidthRight = 4,
-            BorderWidthBottom = 4,
-            CornerRadiusTopLeft = 13,
-            CornerRadiusTopRight = 8,
-            CornerRadiusBottomLeft = 8,
-            CornerRadiusBottomRight = 13,
-            ContentMarginLeft = 5,
-            ContentMarginTop = 2,
-            ContentMarginRight = 5,
-            ContentMarginBottom = 2,
-            ShadowColor = new Color(0.02f, 0.012f, 0.006f, 0.26f),
-            ShadowSize = 2,
-            ShadowOffset = new Vector2(1f, 2f)
-        };
-    }
+        BgColor = bg,
+        BorderColor = border,
+        BorderWidthLeft = 4,
+        BorderWidthTop = 4,
+        BorderWidthRight = 4,
+        BorderWidthBottom = 4,
+        CornerRadiusTopLeft = 13,
+        CornerRadiusTopRight = 8,
+        CornerRadiusBottomLeft = 8,
+        CornerRadiusBottomRight = 13,
+        ContentMarginLeft = 5,
+        ContentMarginTop = 2,
+        ContentMarginRight = 5,
+        ContentMarginBottom = 2,
+        ShadowColor = new Color(0.02f, 0.012f, 0.006f, 0.26f),
+        ShadowSize = 2,
+        ShadowOffset = new Vector2(1f, 2f)
+    };
 }
-
