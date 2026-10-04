@@ -585,6 +585,22 @@ internal static class SnapshotManager
     private static void ApplyManagerFlagsForPlayerTurn(TurnSnapshot snapshot)
     {
         var manager = CombatManager.Instance;
+        // v0.111 moved all player-turn gates from CombatManager fields into
+        // CombatTurnState. Leaving these collections populated makes the next
+        // EndTurn click wait for a stale signal and appears as a soft lock.
+        var turnState = AccessTools.Field(typeof(CombatManager), "_turnState")?.GetValue(manager);
+        if (turnState is not null)
+        {
+            ClearMemberCollection(turnState, "PlayersReadyToEndTurn");
+            ClearMemberCollection(turnState, "PlayersReadyToBeginEnemyTurn");
+            ClearMemberCollection(turnState, "PlayersTakingExtraTurn");
+            SetPropertyOrField(turnState, "IsEnemyTurnStarted", false);
+            SetPropertyOrField(turnState, "EndingPlayerTurnPhaseOne", false);
+            SetPropertyOrField(turnState, "EndingPlayerTurnPhaseTwo", false);
+            SetPropertyOrField(turnState, "PendingLoss", null);
+            SetPropertyOrField(turnState, "IsStarting", false);
+        }
+
         AccessTools.Field(typeof(CombatManager), "_playersReadyToEndTurn")?.GetValue(manager)
             ?.GetType().GetMethod("Clear")?.Invoke(AccessTools.Field(typeof(CombatManager), "_playersReadyToEndTurn")?.GetValue(manager), null);
         AccessTools.Field(typeof(CombatManager), "_playersReadyToBeginEnemyTurn")?.GetValue(manager)
@@ -598,6 +614,19 @@ internal static class SnapshotManager
         AccessTools.PropertySetter(typeof(CombatManager), "EndingPlayerTurnPhaseTwo")?.Invoke(manager, [false]);
         AccessTools.PropertySetter(typeof(CombatManager), "PlayerActionsDisabled")?.Invoke(manager, [false]);
 
+        CancelDeferredActionsWaitingForPlayPhase();
+        try
+        {
+            // Rewind always targets the start of a player turn. This is a
+            // no-op on old builds that are already in PlayPhase, and clears
+            // the v0.111 EndTurnPhaseOne gate on the new synchronizer.
+            RunManager.Instance.ActionQueueSynchronizer.SetCombatState(ActionSynchronizerCombatState.PlayPhase);
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[TurnRewind] action synchronizer phase reset skipped: {ex.Message}");
+        }
+
         try
         {
             (AccessTools.Field(typeof(CombatManager), "_cardOrPotionEffectDepth")?.GetValue(manager) as IDictionary)?.Clear();
@@ -605,6 +634,43 @@ internal static class SnapshotManager
         catch { }
 
         CancelQueuedPotionActions();
+    }
+
+    private static void CancelDeferredActionsWaitingForPlayPhase()
+    {
+        try
+        {
+            var synchronizer = RunManager.Instance.ActionQueueSynchronizer;
+            var waiting = AccessTools.Field(synchronizer.GetType(), "_requestedActionsWaitingForPlayerTurn")?.GetValue(synchronizer) as IList;
+            if (waiting is null)
+                return;
+
+            var count = waiting.Count;
+            foreach (var action in waiting.Cast<object>().ToList())
+            {
+                try { InvokeByName(action, "Cancel"); } catch { }
+            }
+            waiting.Clear();
+            if (count > 0)
+                MainFile.Logger.Info($"[TurnRewind] cleared deferred action requests before returning to PlayPhase: {count}.");
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[TurnRewind] deferred action cleanup skipped: {ex.Message}");
+        }
+    }
+
+    private static void ClearMemberCollection(object target, string name)
+    {
+        try
+        {
+            var value = GetRawMember(target, name);
+            value?.GetType().GetMethod("Clear", Type.EmptyTypes)?.Invoke(value, null);
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[TurnRewind] failed to clear turn-state member {name}: {ex.Message}");
+        }
     }
 
     private static void CancelQueuedPotionActions()
@@ -1435,29 +1501,7 @@ internal static class SnapshotManager
             }
         }
 
-        RestoreSandpitLayout(creature);
         SyncCreaturePowerVisuals(creature);
-    }
-
-    private static void RestoreSandpitLayout(Creature creature)
-    {
-        foreach (var power in creature.Powers.Where(power => power.GetType().Name == "SandpitPower"))
-        {
-            try
-            {
-                // SandpitPower stores the initial target position and timing
-                // fields in the runtime-field snapshot. Re-run only its visual
-                // repositioning routine after those fields are restored; do not
-                // invoke AfterApplied/AfterRemoved, which changes game state.
-                var update = AccessTools.Method(power.GetType(), "UpdateCreaturePositions");
-                if (update?.Invoke(power, null) is Task task)
-                    TaskHelper.RunSafely(task);
-            }
-            catch (Exception ex)
-            {
-                MainFile.Logger.Warn($"[TurnRewind] sandpit visual synchronization skipped: {ex.Message}");
-            }
-        }
     }
 
     private static MonsterState? ResolveMonsterState(

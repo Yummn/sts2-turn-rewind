@@ -16,6 +16,6 @@ public partial class MainFile : Node
     {
         new Harmony(ModId).PatchAll();
         SnapshotManager.Initialize();
-        Logger.Info("[TurnRewind] loaded v0.1.29: drag-select rewind bar and callback-free Sandpit power restoration enabled.");
+        Logger.Info("[TurnRewind] loaded v0.1.30: long-press rewind, movable UI bar, v0.111 turn-state reset, and synchronous Sandpit-safe restore enabled.");
     }
 }
