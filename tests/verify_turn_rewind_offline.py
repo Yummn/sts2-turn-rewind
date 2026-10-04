@@ -20,8 +20,9 @@ def main() -> int:
     manifest = (source_root / "TurnRewind.json").read_text(encoding="utf-8")
 
     checks = {
-        "manifest version is v0.1.30": '"version": "v0.1.30"' in manifest,
-        "load log version is v0.1.30": "loaded v0.1.30" in main_file,
+        "manifest version is v0.1.31": '"version": "v0.1.31"' in manifest,
+        "load log version is v0.1.31": "loaded v0.1.31" in main_file,
+        "sandpit target is restored through its property": "power.Target = target;" in source,
         "snapshot stores complete combat history": "public required List<CombatHistoryEntry> CombatHistoryEntries" in source,
         "capture copies combat history entries": "CombatHistory.Instance" not in source and "CombatManager.Instance.History.Entries.ToList()" in source,
         "restore replaces combat history before player state": (
@@ -74,8 +75,8 @@ def main() -> int:
             and 'AccessTools.Field(typeof(PowerModel), "_skipNextDurationTick")?.SetValue(power, saved.SkipNextDurationTick)' in source
         ),
         "power applier and target references are restored": (
-            'SetPropertyOrField(power, "_applier", saved.Applier)' in source
-            and 'SetPropertyOrField(power, "_target", saved.Target)' in source
+            'AccessTools.Field(typeof(PowerModel), "_applier")?.SetValue(power, ResolveCreatureReference(state, saved.Applier))' in source
+            and 'power.Target = target;' in source
         ),
         "monster intent state ids are snapshotted": (
             "public string? NextMoveId" in source
@@ -140,7 +141,7 @@ def main() -> int:
     passed = [name for name, ok in checks.items() if ok]
     failed = [name for name, ok in checks.items() if not ok]
     report = [
-        "TurnRewind v0.1.30 offline audit",
+        "TurnRewind v0.1.31 offline audit",
         f"Timestamp: {dt.datetime.now().astimezone().isoformat(timespec='seconds')}",
         f"Passed: {len(passed)}",
         f"Failed: {len(failed)}",

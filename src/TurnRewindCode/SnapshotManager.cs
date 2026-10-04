@@ -1358,7 +1358,7 @@ internal static class SnapshotManager
             }
 
             ApplyCreatureVitals(creature, saved.CurrentHp, saved.MaxHp, saved.Block);
-            RestorePowers(creature, saved.Powers);
+            RestorePowers(state, creature, saved.Powers);
         }
     }
 
@@ -1453,7 +1453,7 @@ internal static class SnapshotManager
             creature.GainBlockInternal(block - creature.Block);
     }
 
-    private static void RestorePowers(Creature creature, IReadOnlyList<PowerExtraSnapshot> powers)
+    private static void RestorePowers(CombatState state, Creature creature, IReadOnlyList<PowerExtraSnapshot> powers)
     {
         // RemoveAllPowersInternalExcept calls PowerModel.RemoveInternal(),
         // which invokes AfterRemoved on powers. SandpitPower treats removal as
@@ -1488,8 +1488,15 @@ internal static class SnapshotManager
                 AccessTools.Field(typeof(PowerModel), "_amount")?.SetValue(power, saved.Amount);
                 AccessTools.Field(typeof(PowerModel), "_amountOnTurnStart")?.SetValue(power, saved.AmountOnTurnStart);
                 AccessTools.Field(typeof(PowerModel), "_skipNextDurationTick")?.SetValue(power, saved.SkipNextDurationTick);
-                SetPropertyOrField(power, "_applier", saved.Applier);
-                SetPropertyOrField(power, "_target", saved.Target);
+                AccessTools.Field(typeof(PowerModel), "_applier")?.SetValue(power, ResolveCreatureReference(state, saved.Applier));
+                var target = ResolveCreatureReference(state, saved.Target);
+                if (string.Equals(power.GetType().Name, "SandpitPower", StringComparison.Ordinal) &&
+                    (target is null || !target.IsPlayer))
+                {
+                    target = state.Players.FirstOrDefault()?.Creature;
+                    MainFile.Logger.Warn($"[TurnRewind] repaired SandpitPower target for {creature.ModelId}: target={(target?.ModelId.ToString() ?? "null")}.");
+                }
+                power.Target = target;
                 RestorePowerRuntimeFields(power, saved.RuntimeFields);
                 RestorePowerInternalDataFields(power, saved.InternalDataFields);
                 RestorePowerDynamicVars(power, saved.DynamicVars);
@@ -3314,6 +3321,24 @@ internal static class SnapshotManager
         try { if (AccessTools.Field(type, name)?.GetValue(target) is { } accessFieldValue) return accessFieldValue; } catch { }
         try { if (AccessTools.Property(type, name)?.GetValue(target) is { } accessPropValue) return accessPropValue; } catch { }
         return null;
+    }
+
+    private static Creature? ResolveCreatureReference(CombatState state, Creature? reference)
+    {
+        if (reference is null)
+            return null;
+        if (state.ContainsCreature(reference))
+            return reference;
+
+        var combatId = reference.CombatId;
+        if (combatId.HasValue)
+        {
+            var match = state.Creatures.FirstOrDefault(creature => creature.CombatId == combatId);
+            if (match is not null)
+                return match;
+        }
+
+        return reference;
     }
 
     private static bool ValuesEqual(object? a, object? b)
