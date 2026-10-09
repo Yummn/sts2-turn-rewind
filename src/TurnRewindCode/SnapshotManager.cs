@@ -1455,6 +1455,7 @@ internal static class SnapshotManager
 
     private static void RestorePowers(CombatState state, Creature creature, IReadOnlyList<PowerExtraSnapshot> powers)
     {
+        ClearCreaturePowerVisuals(creature);
         // RemoveAllPowersInternalExcept calls PowerModel.RemoveInternal(),
         // which invokes AfterRemoved on powers. SandpitPower treats removal as
         // the real finisher and kills the player, so a rewind must detach the
@@ -1509,6 +1510,33 @@ internal static class SnapshotManager
         }
 
         SyncCreaturePowerVisuals(creature);
+    }
+
+    private static void ClearCreaturePowerVisuals(Creature creature)
+    {
+        // Clearing _powers intentionally does not raise PowerRemoved: its
+        // gameplay callbacks would trigger Sandpit's finisher. Remove the old
+        // presentation nodes separately so the player cannot retain ghost
+        // power icons alongside the freshly restored power instances.
+        if (NCombatRoom.Instance is not { } room) return;
+        var creatureNode = room.GetCreatureNode(creature);
+        if (creatureNode is not null)
+        {
+            var unsubscribe = AccessTools.Method(typeof(NCreature), "UnsubscribeFromPower");
+            foreach (var power in creature.Powers)
+                unsubscribe?.Invoke(creatureNode, [power]);
+        }
+        foreach (var container in FindNodesByType(room, typeof(NPowerContainer)).OfType<NPowerContainer>())
+        {
+            if (!ReferenceEquals(AccessTools.Field(typeof(NPowerContainer), "_creature")?.GetValue(container), creature))
+                continue;
+            foreach (var icon in container.GetChildren().OfType<NPower>().ToList())
+            {
+                container.RemoveChild(icon);
+                icon.QueueFree();
+            }
+            (AccessTools.Field(typeof(NPowerContainer), "_powerNodes")?.GetValue(container) as IList)?.Clear();
+        }
     }
 
     private static MonsterState? ResolveMonsterState(

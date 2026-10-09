@@ -16,6 +16,6 @@ public partial class MainFile : Node
     {
         new Harmony(ModId).PatchAll();
         SnapshotManager.Initialize();
-        Logger.Info("[TurnRewind] loaded v0.1.31: long-press rewind, movable UI bar, v0.111 turn-state reset, and Sandpit target rebinding enabled.");
+        Logger.Info("[TurnRewind] loaded v0.1.32: long-press rewind, movable UI bar, v0.111 turn-state reset, Sandpit target rebinding, and stale power-icon cleanup enabled.");
     }
 }
